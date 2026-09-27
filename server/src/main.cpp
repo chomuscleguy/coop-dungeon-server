@@ -181,6 +181,25 @@ struct Room {
 };
 
 // ============================================================
+// Friendship — 두 사람 사이의 관계 하나
+// ============================================================
+// 관계를 각자 목록으로 들고 있으면 같은 사실이 양쪽에 적힌다. 수락할 때 네 곳을
+// 동시에 고쳐야 하고, 한 곳이라도 빠지면 "나는 친구인데 쟤는 아닌" 상태가 된다.
+// 사실을 한 군데만 두면 어긋날 수가 없다.
+struct Friendship {
+    uint64_t a = 0;              // 항상 a < b 로 정규화해서 저장
+    uint64_t b = 0;
+    uint64_t requested_by = 0;   // 누가 신청했나 (수락 권한 판정에 쓴다)
+    bool accepted = false;
+
+    // 이 관계에 참여한 사람인가
+    bool involves(uint64_t id) const { return a == id || b == id; }
+
+    // 나 말고 상대방
+    uint64_t other(uint64_t me) const { return (a == me) ? b : a; }
+};
+
+// ============================================================
 // PlayerRegistry — 계정 정보. 연결이 끊겨도 살아남는다.
 // ============================================================
 // 지금까지 플레이어 정보(번호, 유저네임)는 Session 안에 있었고 연결이 끊기면
@@ -217,6 +236,12 @@ public:
         return (it == players_.end()) ? nullptr : &it->second;
     }
 
+    // 유저네임으로 계정을 찾는다. 없으면 nullptr (login과 달리 만들지 않는다).
+    Player* find_by_name(const std::string& username) {
+        auto it = name_to_id_.find(username);
+        return (it == name_to_id_.end()) ? nullptr : &players_[it->second];
+    }
+
     void grant_currency(uint64_t player_id, uint64_t amount) {
         if (Player* p = find(player_id)) p->currency += amount;
     }
@@ -244,11 +269,75 @@ public:
         if (Player* p = find(player_id)) p->online = online;
     }
 
+    // ---- 친구 ----
+    // a < b 정규화. 어느 쪽이 신청했든 같은 관계를 같은 자리에서 찾게 한다.
+    Friendship* find_friendship(uint64_t x, uint64_t y) {
+        uint64_t lo = std::min(x, y);
+        uint64_t hi = std::max(x, y);
+        for (Friendship& f : friendships_) {
+            if (f.a == lo && f.b == hi) return &f;
+        }
+        return nullptr;
+    }
+
+    // 새 신청을 만든다. 이미 관계가 있으면(신청 중이든 친구든) nullptr.
+    Friendship* add_request(uint64_t from, uint64_t to) {
+        if (from == to) return nullptr;
+        if (find_friendship(from, to)) return nullptr;
+
+        Friendship f;
+        f.a = std::min(from, to);
+        f.b = std::max(from, to);
+        f.requested_by = from;
+        f.accepted = false;
+        friendships_.push_back(f);
+        return &friendships_.back();
+    }
+
+    void remove_friendship(uint64_t x, uint64_t y) {
+        uint64_t lo = std::min(x, y);
+        uint64_t hi = std::max(x, y);
+        friendships_.erase(
+            std::remove_if(friendships_.begin(), friendships_.end(),
+                [lo, hi](const Friendship& f) { return f.a == lo && f.b == hi; }),
+            friendships_.end());
+    }
+
+    // 나와 관련된 관계를 전부 모아 JSON으로. 수락된 친구와 대기 중인 신청을 나눠 담는다.
+    nlohmann::json friend_list_json(uint64_t me) {
+        nlohmann::json friends = nlohmann::json::array();
+        nlohmann::json incoming = nlohmann::json::array();
+        nlohmann::json outgoing = nlohmann::json::array();
+
+        for (const Friendship& f : friendships_) {
+            if (!f.involves(me)) continue;
+
+            Player* p = find(f.other(me));
+            if (!p) continue;
+
+            nlohmann::json entry;
+            entry["playerId"] = p->id;
+            entry["username"] = p->username;
+            entry["online"] = p->online;
+
+            if (f.accepted)                    friends.push_back(entry);
+            else if (f.requested_by == me)     outgoing.push_back(entry);
+            else                               incoming.push_back(entry);
+        }
+
+        nlohmann::json j;
+        j["friends"] = friends;
+        j["incoming"] = incoming;
+        j["outgoing"] = outgoing;
+        return j;
+    }
+
 private:
     std::unordered_map<uint64_t, Player> players_;
     std::unordered_map<std::string, uint64_t> name_to_id_;
     uint64_t next_id_ = 1;
     uint64_t next_item_id_ = 1;
+    std::vector<Friendship> friendships_;
 };
 
 class Server;   // 전방 선언 — Session이 Server&를 갖기 위해 필요
@@ -388,6 +477,10 @@ private:
             if (type == "BossAttack") { handle_boss_attack();    return; }
             if (type == "LootBid") { handle_loot_bid(data);      return; }
             if (type == "InventoryList") { handle_inventory_list(); return; }
+            if (type == "FriendRequest") { handle_friend_request(data); return; }
+            if (type == "FriendRespond") { handle_friend_respond(data); return; }
+            if (type == "FriendList") { handle_friend_list(); return; }
+            if (type == "FriendRemove") { handle_friend_remove(data); return; }
 
             send_error("unknown message type: " + type);
         }
@@ -414,6 +507,11 @@ private:
     void handle_boss_attack();
     void handle_loot_bid(const nlohmann::json& data);
     void handle_inventory_list();
+    void handle_friend_request(const nlohmann::json& data);
+    void handle_friend_respond(const nlohmann::json& data);
+    void handle_friend_list();
+    void handle_friend_remove(const nlohmann::json& data);
+
     void on_disconnect();
 
     // ---- 멤버 ----
@@ -673,6 +771,59 @@ public:
         d["result"] = "sold";
         broadcast_to_room(room.id,
             { {"type", "LootAuctionClosed"}, {"data", d} });
+    }
+
+    // ---- 친구 ----
+    // 신청을 만들고, 상대가 접속 중이면 바로 알려준다.
+    void notify_friend_request(uint64_t from, uint64_t to) {
+        auto it = sessions_.find(to);
+        if (it == sessions_.end()) return;      // 접속 중이 아니면 나중에 목록으로 본다
+
+        PlayerRegistry::Player* sender = players_.find(from);
+
+        nlohmann::json d;
+        d["fromId"] = from;
+        d["fromName"] = sender ? sender->username : "";
+        it->second->send({ {"type", "FriendRequestReceived"}, {"data", d} });
+    }
+
+    // 수락됐음을 양쪽에 알린다. 관계는 둘의 것이므로 통지도 둘 다 받아야 한다.
+    void notify_friend_accepted(uint64_t x, uint64_t y) {
+        send_friend_accepted_to(x, y);
+        send_friend_accepted_to(y, x);
+    }
+
+    // 삭제도 양쪽에 알린다. 한쪽만 알면 상대 목록엔 남아있다고 착각한다.
+    void notify_friend_removed(uint64_t x, uint64_t y) {
+        send_friend_removed_to(x, y);
+        send_friend_removed_to(y, x);
+    }
+
+    void send_friend_removed_to(uint64_t who, uint64_t former_friend) {
+        auto it = sessions_.find(who);
+        if (it == sessions_.end()) return;
+
+        PlayerRegistry::Player* f = players_.find(former_friend);
+        if (!f) return;
+
+        nlohmann::json d;
+        d["playerId"] = f->id;
+        d["username"] = f->username;
+        it->second->send({ {"type", "FriendRemoved"}, {"data", d} });
+    }
+
+    void send_friend_accepted_to(uint64_t who, uint64_t friend_id) {
+        auto it = sessions_.find(who);
+        if (it == sessions_.end()) return;
+
+        PlayerRegistry::Player* f = players_.find(friend_id);
+        if (!f) return;
+
+        nlohmann::json d;
+        d["playerId"] = f->id;
+        d["username"] = f->username;
+        d["online"] = f->online;
+        it->second->send({ {"type", "FriendAdded"}, {"data", d} });
     }
 
     // 전투 중 끊김 — 자리를 지켜주되 마감 시각을 박아둔다.
@@ -1027,6 +1178,140 @@ void Session::handle_inventory_list() {
     send({ {"type", "InventoryResult"}, {"data", d} });
 }
 
+void Session::handle_friend_request(const nlohmann::json& data) {
+    std::string target_name = data.value("username", "");
+    if (target_name.empty()) {
+        send_error("username required");
+        return;
+    }
+    if (target_name == username_) {
+        send_error("cannot add yourself");
+        return;
+    }
+
+    PlayerRegistry::Player* target = server_.players().find_by_name(target_name);
+    if (!target) {
+        send_error("no such player");
+        return;
+    }
+
+    // 이미 관계가 있으면 사유를 구분해서 알려준다
+    Friendship* existing = server_.players().find_friendship(player_id_, target->id);
+    if (existing) {
+        if (existing->accepted) {
+            send_error("already friends");
+        }
+        else if (existing->requested_by == player_id_) {
+            send_error("already requested");
+        }
+        else {
+            send_error("they already sent you a request");
+        }
+        return;
+    }
+
+    if (!server_.players().add_request(player_id_, target->id)) {
+        send_error("cannot send request");
+        return;
+    }
+
+    std::cout << username_ << " sent friend request to " << target_name << std::endl;
+
+    server_.notify_friend_request(player_id_, target->id);
+
+    nlohmann::json ok;
+    ok["toId"] = target->id;
+    ok["toName"] = target->username;
+    send({ {"type", "FriendRequestSent"}, {"data", ok} });
+}
+
+void Session::handle_friend_respond(const nlohmann::json& data) {
+    std::string from_name = data.value("username", "");
+    if (from_name.empty()) {
+        send_error("username required");
+        return;
+    }
+
+    PlayerRegistry::Player* other = server_.players().find_by_name(from_name);
+    if (!other) {
+        send_error("no such player");
+        return;
+    }
+
+    Friendship* f = server_.players().find_friendship(player_id_, other->id);
+    if (!f) {
+        send_error("no pending request");
+        return;
+    }
+    if (f->accepted) {
+        send_error("already friends");
+        return;
+    }
+    // 내가 보낸 신청을 내가 수락할 수는 없다
+    if (f->requested_by == player_id_) {
+        send_error("you sent this request");
+        return;
+    }
+
+    bool accept = data.value("accept", false);
+
+    if (!accept) {
+        server_.players().remove_friendship(player_id_, other->id);
+        std::cout << username_ << " declined " << from_name << std::endl;
+
+        nlohmann::json d;
+        d["username"] = other->username;
+        d["accepted"] = false;
+        send({ {"type", "FriendRespondOk"}, {"data", d} });
+        return;
+    }
+
+    f->accepted = true;                      // 수락은 이 한 줄
+    std::cout << username_ << " accepted " << from_name << std::endl;
+
+    server_.notify_friend_accepted(player_id_, other->id);
+}
+
+void Session::handle_friend_list() {
+    send({ {"type", "FriendListResult"},
+           {"data", server_.players().friend_list_json(player_id_)} });
+}
+
+void Session::handle_friend_remove(const nlohmann::json& data) {
+    std::string target_name = data.value("username", "");
+    if (target_name.empty()) {
+        send_error("username required");
+        return;
+    }
+
+    PlayerRegistry::Player* other = server_.players().find_by_name(target_name);
+    if (!other) {
+        send_error("no such player");
+        return;
+    }
+
+    Friendship* f = server_.players().find_friendship(player_id_, other->id);
+    if (!f) {
+        send_error("not friends");
+        return;
+    }
+
+    if (!f->accepted) {
+        // 아직 수락 전인 신청은 취소로 처리한다
+        server_.players().remove_friendship(player_id_, other->id);
+
+        nlohmann::json d;
+        d["username"] = other->username;
+        d["cancelled"] = true;
+        send({ {"type", "FriendRemoveOk"}, {"data", d} });
+        return;
+    }
+
+    server_.players().remove_friendship(player_id_, other->id);
+    std::cout << username_ << " removed friend " << target_name << std::endl;
+
+    server_.notify_friend_removed(player_id_, other->id);
+}
 
 void Session::handle_match_enqueue() {
     if (server_.room_of(player_id_) != 0) {

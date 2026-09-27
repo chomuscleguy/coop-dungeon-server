@@ -44,7 +44,7 @@
 - [x] Step 8: 매칭 큐 + 보스 스폰
 - [x] Step 9: 보스 공격 + 클리어 리워드
 - [x] Step 10: 파티 경매 (보스 드랍 분배, 타이머 마감)
-- [ ] Step 11: 친구 (요청/수락/목록)
+- [x] Step 11: 친구 (요청/수락/거절/삭제/목록, 온라인 여부)
 - [ ] Step 12: 라즈베리파이 배포 (systemd 서비스로 상시 구동)
 
 ## 프로젝트 구조
@@ -82,6 +82,10 @@ tools/
 | `BossAttack` | `{}` | 보스 공격. **데미지는 서버가 정한다** |
 | `LootBid` | `{"amount": 300}` | 파티 경매 입찰. 즉시 차감되고, 밀려나면 환불 |
 | `InventoryList` | `{}` | 내 재화와 아이템 조회 |
+| `FriendRequest` | `{"username": "bob"}` | 친구 신청 |
+| `FriendRespond` | `{"username": "alice", "accept": true}` | 수락 / 거절 |
+| `FriendList` | `{}` | 친구 + 받은 신청 + 보낸 신청 조회 |
+| `FriendRemove` | `{"username": "bob"}` | 친구 삭제. 수락 전이면 신청 취소 |
 
 **Server → Client**
 
@@ -103,6 +107,26 @@ tools/
 | `LootBidUpdate` | `LootAuctionStarted`와 같은 모양 | 최고가 갱신. 방 전원에게 |
 | `LootAuctionClosed` | `{"item": {...}, "result": "sold", "winnerId": 2, "winningBid": 300}` | 마감. `result`는 `sold` / `expired` |
 | `InventoryResult` | `{"items": [{"id": 1, "name": "Slime Core"}], "currency": 200}` | 재화 + 아이템. 요청한 본인에게만 |
+| `FriendRequestSent` | `{"toId": 2, "toName": "bob"}` | 신청 접수됨. 보낸 본인에게 |
+| `FriendRequestReceived` | `{"fromId": 1, "fromName": "alice"}` | 신청 도착. 받는 쪽이 **접속 중일 때만** |
+| `FriendAdded` | `{"playerId": 2, "username": "bob", "online": true}` | 친구 성립. **양쪽 모두** |
+| `FriendRemoved` | `{"playerId": 2, "username": "bob"}` | 친구 끊김. **양쪽 모두** |
+| `FriendRespondOk` | `{"username": "carol", "accepted": false}` | 거절 완료. 거절한 본인에게만 |
+| `FriendRemoveOk` | `{"username": "alice", "cancelled": true}` | 신청 취소 완료. 취소한 본인에게만 |
+
+**친구 목록**은 관계를 세 갈래로 나눠 돌려준다.
+
+```json
+{"friends":  [{"playerId":2,"username":"bob","online":true}],
+ "incoming": [{"playerId":3,"username":"carol","online":false}],
+ "outgoing": []}
+```
+
+`incoming`은 내가 수락하면 되는 신청, `outgoing`은 상대의 응답을 기다리는 신청이다.
+셋 다 없으면 빈 배열이 온다.
+
+거절당했다는 알림은 **보내지 않는다.** 신청자 입장에선 `outgoing`에서 사라질 뿐이다.
+신청 취소도 마찬가지로 상대에게 알리지 않는다 — 아직 못 봤을 수도 있으므로.
 
 `RewardGrant`의 `reason`은 셋이다 — `boss_clear`(클리어 보상) / `outbid`(입찰이 밀려서 환불) /
 `loot_share`(낙찰금 분배). 지급 경로마다 메시지를 새로 만들지 않고 한 타입을 재사용한다.
@@ -853,5 +877,114 @@ void unregister_session(uint64_t player_id, const Session* who) {
     새 연결도 정상 처리하고 있었고, 로그에는 타임아웃 처리가 제대로 찍혀 있었다 — 도구 문제.
     원인은 프레임 동기화 깨짐(위 **테스트** 절 참고). 멈추지 않고 터지게 만드는 데까지만
     손보고, 근본 수정(수신 버퍼)은 Unity 클라이언트 몫으로 남겼다.
+
+</details>
+
+<details>
+<summary><b>Step 11 — 친구</b></summary>
+
+**Decision:** 관계를 `Friendship{a, b, requested_by, accepted}` 하나로 표현하고 `PlayerRegistry`가
+목록으로 보관한다. `a < b`로 정규화해서 누가 신청했든 같은 자리에서 찾게 하고,
+신청·수락·거절·삭제·목록을 그 위에 얹는다.
+
+**Why:** 지금까지 서버가 "사람들"을 담아둔 곳은 셋이었다 — `Room::members`(방 나가면 끝),
+`match_queue_`(매칭되면 끝), `sessions_`(끊기면 끝). **전부 "지금 이 순간"의 관계**다.
+
+친구는 다르다. **접속하지 않은 사람과도 유지**되고(→ 연결보다 오래 사는 `PlayerRegistry`에 살아야 함),
+**상대가 수락해야 성립**하며(→ 한쪽만 신청한 중간 상태가 존재), **양방향**이다
+(→ 한쪽만 갱신하면 "나는 친구인데 쟤는 아닌" 상태가 생김).
+
+**Alternatives considered:**
+- **각자 목록을 들고 있기** (`Player`가 `friends` / `incoming` / `outgoing` 벡터를 각각 보관):
+  조회가 빠르다. 그런데 같은 사실이 양쪽에 적히므로 **수락 한 번에 네 곳을 고쳐야 한다** —
+  신청자의 `outgoing`에서 빼고, 수신자의 `incoming`에서 빼고, 양쪽 `friends`에 넣기.
+  하나라도 빠지면 어긋난다. Step 8에서 `Session::room_id_` 사본을 없앤 것과 같은 판단으로,
+  **사실을 한 군데만 두는 쪽**을 택했다. 그 결과 수락이 `f->accepted = true;` **한 줄**이 됐다.
+- **플레이어 번호로 신청**(`{"playerId": 3}`): 같은 방에서 만난 사람에게 걸 땐 편하다.
+  그런데 번호를 알 경로가 제한적이라 **유저네임**으로 갔다. 이름이 곧 계정이므로(Step 9)
+  `find_by_name` 하나로 찾을 수 있다.
+
+**`a < b` 정규화:** alice(1)가 bob(2)에게 걸든 반대든 저장은 항상 `{a:1, b:2}`다.
+이게 없으면 찾을 때마다 `(f.a==x && f.b==y) || (f.a==y && f.b==x)`를 확인해야 하고,
+무엇보다 **같은 관계가 `{1,2}`와 `{2,1}` 두 개로 들어가는 실수**가 가능해진다.
+
+**`requested_by`를 따로 저장하는 이유:** 정규화하면서 "누가 걸었는지"가 사라진다.
+이 값이 두 곳에서 일한다.
+- **자기 신청을 자기가 수락하는 걸 막는다.** 없으면 누구에게나 신청을 걸고 바로 수락해서
+  **일방적으로 친구가 될 수 있다.**
+- **양쪽이 동시에 신청한 상황**을 구분해서 안내한다. `"이미 관계가 있음"`이라고만 하면
+  사용자는 뭘 해야 할지 모른다. `"they already sent you a request"`로 **수락하면 된다고**
+  알려준다. 에러를 `already friends` / `already requested` / `they already sent you a request`
+  셋으로 나눈 게 그래서다.
+
+**`find_by_name`이 `login`과 다른 점:** `login`은 없으면 계정을 만든다(Step 9).
+그걸 재사용하면 `"asdfasdf"`에게 친구 신청했을 때 **빈 계정이 생긴다.** 없으면 `nullptr`을
+주는 함수를 따로 뒀다. 반환 타입도 다르다 — `login`은 항상 성공하니 참조, 이건 포인터.
+
+**설계 판단:**
+- **목록은 한 번의 순회로 셋을 나눈다** — `accepted`면 친구, 아니면서 `requested_by == me`면
+  보낸 신청, 그 외는 받은 신청. 관계 하나에서 세 갈래가 파생된다.
+- **`online`이 두 번째 쓸모를 찾았다** — Step 9에서 중복 로그인 판정용으로 만든 플래그가
+  이제 친구 목록에 실려 "접속 중" 표시가 된다.
+- **수락·삭제는 양쪽에 알린다** — 관계는 둘의 것이다. 한쪽만 알면 상대는 아직 친구라고
+  믿고 있다가 나중에 엉뚱한 곳에서 알게 된다.
+- **거절과 신청 취소는 알리지 않는다** — 거절당했다는 알림은 기분 나쁘고, 취소는 상대가
+  아직 못 봤을 수도 있다. 신청자 입장에선 목록에서 사라질 뿐이다.
+- **삭제와 취소를 한 메시지로** — `accepted` 여부로 갈라진다. 둘 다 "그 관계를 없앤다"라서
+  `FriendCancel`을 따로 만들지 않았다. 클라이언트도 목록의 X 버튼 하나면 된다.
+- **거절은 상태가 아니라 삭제** — `declined`를 따로 두지 않고 관계를 지운다. 없던 일이
+  되므로 다시 신청할 수 있다. "거절당하면 못 건다"는 스팸 방지 요구가 생기면 그때 만든다.
+
+**성능은 나중에:** `find_friendship`이 전체를 훑는다. 관계가 10만 개면 느리다.
+지금은 몇 개 안 되고 **어긋나지 않는 게 더 중요**해서 그대로 뒀다. 느려지면
+`unordered_map<uint64_t, vector<size_t>>` 색인을 옆에 두면 되는데, Step 8의 `player_to_room_`처럼
+**필요해질 때** 하면 된다.
+
+**막혔던 부분:** `handle_friend_remove`를 선언만 하고 정의를 빼먹어서 `LNK2019` 링커 에러.
+컴파일은 통과한다 — 컴파일러는 선언을 보고 "어딘가 정의가 있겠지" 하고 넘어가고,
+링커가 실제로 찾을 때 없다는 걸 발견하기 때문. Step 6에서 만든 "클래스 안엔 선언만,
+정의는 뒤로" 패턴의 대가다. 에러 메시지가 길고 읽기 어려운 건 이름 장식(name mangling)
+때문인데(`nlohmann::json`의 실제 타입이 템플릿 인자 11개짜리다), **맨 앞의
+`Session::handle_friend_remove`만 보면 된다.**
+
+**현재 한계 (의도적):**
+- **귓속말 없음** — 친구가 생겼으니 다음 수순인데, 방 단위 채팅(Step 7)과 전달 경로가
+  같아서 새로 배울 게 적다고 판단했다.
+- **친구 초대 없음** — "내 방으로 오라"는 매칭과 방 기능을 엮어야 한다.
+- **차단 없음** — 스팸 신청을 막을 방법이 없다.
+- **친구 수 제한 없음** — `friendships_`가 무한히 늘어난다.
+- **접속/종료 알림 없음** — 친구가 접속해도 모른다. `FriendList`를 다시 조회해야 안다.
+  `online`이 바뀔 때 친구들에게 밀어주는 게 자연스러운 다음 단계.
+
+**검증:** alice/bob/carol/dave 네 연결로 확인.
+
+*신청 (11b)*
+1. 없는 유저 → `no such player` / 자기 자신 → `cannot add yourself`
+2. alice → bob 신청 → alice는 `FriendRequestSent`, bob은 `FriendRequestReceived`
+3. 같은 신청 반복 → `already requested`
+4. **bob이 반대로 신청 → `they already sent you a request`** (수락하라는 안내)
+
+*수락·거절 (11c)*
+5. **alice가 자기 신청을 수락 시도 → `you sent this request`** (`requested_by` 검사)
+6. bob이 수락 → **양쪽 다** `FriendAdded` 수신
+7. 이미 친구인데 또 신청 → `already friends`
+8. carol → alice 신청 후 alice가 거절 → alice만 `FriendRespondOk`, **carol에겐 알림 없음**
+9. 거절 후 다시 신청 → 정상 접수 (거절이 상태로 남지 않음)
+
+*목록 (11d)*
+10. 관계 없을 때 → `{"friends":[],"incoming":[],"outgoing":[]}`
+11. **같은 관계가 양쪽에서 다르게 보임** — alice는 `outgoing`, bob은 `incoming`
+12. 수락 후 → 양쪽 다 `friends`로 이동
+13. bob 접속 종료 → alice 목록에서 `online:false`
+14. **오프라인 dave에게 신청 → dave가 재접속하니 `incoming`에 남아 있음**
+    (지금까지 모든 알림은 "접속 중인 사람에게 지금"이었는데, 친구는 나중에 확인이 기본)
+
+*삭제 (11e)*
+15. 관계 없는 사람 삭제 → `not friends`
+16. 친구 삭제 → **양쪽 다** `FriendRemoved`, 양쪽 목록에서 사라짐
+17. 삭제 후 다시 친구 맺기 → 정상
+18. **수락 전 신청 취소** → 취소한 본인만 `FriendRemoveOk{cancelled:true}`, 상대는 조용히
+    `incoming`에서 사라짐
+19. 오프라인 친구 삭제 → 터지지 않음 (세션이 없으면 알림만 생략)
 
 </details>
