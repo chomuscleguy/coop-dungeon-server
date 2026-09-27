@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdlib> 
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -7,6 +8,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include <chrono>
+#include <optional>
+#include <utility>
 #include <boost/asio.hpp>
 #include <nlohmann/json.hpp>
 
@@ -91,7 +94,6 @@ struct LootAuction {
         return j;
     }
 };
-
 
 struct Room {
     uint32_t id = 0;
@@ -546,6 +548,24 @@ public:
         start_tick_timer();
     }
 
+    // 새 연결을 그만 받고 타이머를 멈춘다. 진행 중인 비동기 작업이 끝나면
+    // io_context에 할 일이 없어지므로 io.run()이 스스로 반환한다.
+    void stop() {
+        std::cout << "Shutting down..." << '\n';
+
+        boost::system::error_code ec;
+        acceptor_.close(ec);
+        tick_timer_.cancel();
+
+        // 로그인 여부와 무관하게 모든 연결을 닫는다.
+        // 하나라도 읽기 대기가 남으면 io.run()이 반환하지 않는다.
+        for (const std::weak_ptr<Session>& w : all_sessions_) {
+            if (auto s = w.lock()) s->close();
+        }
+        all_sessions_.clear();
+        sessions_.clear();
+    }
+
     // ---- 방 관리 ----
     // "누가 어느 방에 있나"는 rooms_[].members에도 들어있지만, 번호로 거꾸로 찾으려면
     // 방 전체를 뒤져야 한다. 역방향 색인을 따로 둬서 O(1)로 찾는다.
@@ -912,12 +932,16 @@ private:
     void do_accept() {
         acceptor_.async_accept(
             [this](boost::system::error_code ec, tcp::socket socket) {
-                if (!ec) {
-                    std::cout << "Client connected: "
-                        << socket.remote_endpoint() << '\n';
-                    std::make_shared<Session>(
-                        std::move(socket), *this)->start();
-                }
+                // acceptor가 닫히면(stop()) 에러와 함께 불린다. 여기서 끝내야
+                // io_context에 할 일이 없어져 io.run()이 반환한다.
+                if (ec) return;
+
+                std::cout << "Client connected: "
+                    << socket.remote_endpoint() << '\n';
+                auto session = std::make_shared<Session>(std::move(socket), *this);
+                all_sessions_.push_back(session);
+                session->start();
+
                 do_accept();
             });
     }
@@ -957,6 +981,12 @@ private:
                 broadcast_room_state(left_room);
             }
         }
+
+        // 죽은 연결의 weak_ptr을 걷어낸다. 안 그러면 목록이 계속 길어진다.
+        all_sessions_.erase(
+            std::remove_if(all_sessions_.begin(), all_sessions_.end(),
+                [](const std::weak_ptr<Session>& w) { return w.expired(); }),
+            all_sessions_.end());
     }
 
     tcp::acceptor acceptor_;
@@ -965,6 +995,9 @@ private:
     std::unordered_map<uint32_t, Room> rooms_;
     std::unordered_map<uint64_t, uint32_t> player_to_room_;
     std::unordered_map<uint64_t, std::shared_ptr<Session>> sessions_;  // 로그인한 연결만
+    // 로그인 여부와 무관하게 살아있는 모든 연결. 종료할 때 전부 닫아야
+    // io.run()이 반환한다. 소유는 async 핸들러 체인이 하므로 weak_ptr로 본다.
+    std::vector<std::weak_ptr<Session>> all_sessions_;
     std::vector<uint64_t> match_queue_;
     // 전투 중 끊겨서 자리를 비워둔 사람들. 값은 "이때까지 안 오면 정리" 시각.
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> pending_reconnect_;
@@ -1373,15 +1406,70 @@ void Session::on_disconnect() {
     }
 }
 
+// 포트 우선순위: 명령행 인자 > 환경변수 > 기본값.
+// systemd/docker는 환경변수가 편하고, 손으로 돌려볼 땐 인자가 편하다.
+// 잘못된 값은 조용히 무시하지 않는다 — 요청한 포트와 다른 데서 듣는 게 더 나쁘다.
+std::optional<unsigned short> resolve_port(int argc, char* argv[]) {
+    long value = 7777;
+    const char* source = "default";
+
+    if (const char* env = std::getenv("GAME_SERVER_PORT")) {
+        char* end = nullptr;
+        value = std::strtol(env, &end, 10);
+        if (*env == '\0' || *end != '\0') {
+            std::cerr << "Invalid GAME_SERVER_PORT: " << env << '\n';
+            return std::nullopt;
+        }
+        source = "GAME_SERVER_PORT";
+    }
+
+    if (argc > 1) {
+        char* end = nullptr;
+        value = std::strtol(argv[1], &end, 10);
+        if (*argv[1] == '\0' || *end != '\0') {
+            std::cerr << "Invalid port argument: " << argv[1] << '\n';
+            return std::nullopt;
+        }
+        source = "argv[1]";
+    }
+
+    if (value < 1 || value > 65535) {
+        std::cerr << "Port out of range (1-65535): " << value << '\n';
+        return std::nullopt;
+    }
+
+    std::cout << "Port " << value << " (from " << source << ")" << '\n';
+    return static_cast<unsigned short>(value);
+}
+
 // ============================================================
-int main() {
+int main(int argc, char* argv[]) {
+    std::cout << std::unitbuf;
+
+    std::optional<unsigned short> port = resolve_port(argc, argv);
+    if (!port) {
+        return 1;
+    }
+
     try {
         boost::asio::io_context io;
-        Server server(io, 7777);
+        Server server(io, *port); 
         server.start();
+
+        // SIGTERM(docker stop, systemctl stop), SIGINT(Ctrl+C)를 받으면 정상 종료
+        boost::asio::signal_set signals(io, SIGINT, SIGTERM);
+        signals.async_wait([&server](const boost::system::error_code& ec, int sig) {
+            if (ec) return;
+            std::cout << "Signal " << sig << " received" << std::endl;
+            server.stop();
+            });
+
         io.run();
+        std::cout << "Stopped cleanly" << std::endl;
     }
     catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << '\n';
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
     }
+    return 0;
 }

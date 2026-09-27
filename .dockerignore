@@ -1,0 +1,7 @@
+.git
+server/build
+server/out
+.vs
+*.user
+tools
+README.md
