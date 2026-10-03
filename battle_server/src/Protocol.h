@@ -21,6 +21,7 @@ namespace protocol {
 		Heartbeat = 3,       // 양방향: 살아있음
 		Input = 4,           // 클라 -> 서버: 이동 입력
 		Snapshot = 5,        // 서버 -> 클라: 월드 상태
+		Event = 6,           // 서버 -> 클라: 한 번뿐인 사건 (신뢰)
 	};
 
 	struct PacketHeader {
@@ -39,6 +40,14 @@ namespace protocol {
 	// 이만큼 조용하면 죽은 것으로 보고 정리한다.
 	// 하트비트 간격의 몇 배로 잡아야 한두 개 유실돼도 안 끊긴다.
 	inline constexpr int kTimeoutSeconds = 5;
+
+	// 시퀀스는 uint16 이라 65535 다음이 0이다. 단순 비교로는 어느 쪽이 최신인지
+	// 알 수 없어서, "차이가 절반(32768) 이내면 그쪽이 최신"으로 판정한다.
+	// 30Hz 에서 32768 패킷이면 18분이라, 그 사이에 도착할 패킷은 없다.
+	inline bool sequence_greater_than(std::uint16_t s1, std::uint16_t s2) {
+		return ((s1 > s2) && (s1 - s2 <= 32768)) ||
+			((s1 < s2) && (s2 - s1 > 32768));
+	}
 
 	// 네트워크 바이트 순서(빅엔디안)로 쓴다. 로비의 길이-prefix와 같은 규칙.
 	// CPU마다 메모리에 숫자를 놓는 순서가 달라서(엔디언), 한쪽으로 통일해야 한다.

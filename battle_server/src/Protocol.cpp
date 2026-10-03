@@ -64,6 +64,7 @@ namespace protocol {
 		case PacketType::Heartbeat:    return "Heartbeat";
 		case PacketType::Input:        return "Input";
 		case PacketType::Snapshot:     return "Snapshot";
+		case PacketType::Event:        return "Event";
 		default:                       return "Invalid";
 		}
 	}
