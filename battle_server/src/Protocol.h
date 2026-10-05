@@ -45,14 +45,33 @@ namespace protocol {
 
 	inline constexpr std::size_t kInputPayloadSize = 2;
 
+	enum class EntityType : std::uint8_t {
+		Player = 0,
+		Monster = 1,
+	};
+
 	// 스냅샷에 담기는 엔티티 하나.
-	struct PlayerState {
+	struct EntityState {
 		std::uint32_t id = 0;
+		EntityType type = EntityType::Player;
 		float x = 0.0f;
 		float y = 0.0f;
 	};
 
-	inline constexpr std::size_t kPlayerStateSize = 8;   // 4 + 2 + 2
+	inline constexpr std::size_t kEntityStateSize = 9;   // 4 + 1 + 2 + 2
+
+	enum class EventKind : std::uint8_t {
+		MonsterDied = 1,
+		MonsterSpawned = 2,
+	};
+
+	// Event 패킷의 본문. "한 번뿐인 사건"이라 반드시 도착해야 한다.
+	struct EventPayload {
+		EventKind kind = EventKind::MonsterDied;
+		std::uint32_t entity_id = 0;
+	};
+
+	inline constexpr std::size_t kEventPayloadSize = 5;   // 1 + 4
 
 	// 좌표를 int16 으로 담을 때의 배율. 맵이 -50~50 이므로
 	// 100배 하면 -5000~5000 이고 정밀도는 0.01 유닛이다.
@@ -81,6 +100,17 @@ namespace protocol {
 	// 초당 이동 거리. 맵은 -50 ~ 50 이라 가로지르는 데 20초.
 	inline constexpr float kPlayerSpeed = 5.0f;
 	inline constexpr float kMapHalfSize = 50.0f;
+
+	// 플레이어(5.0)보다 느리다. 도망칠 수 있어야 하고, 그래야
+	// "몰려오는 걸 뚫고 지나간다"가 성립한다.
+	inline constexpr float kMonsterSpeed = 2.0f;
+
+	inline constexpr int kMonsterHp = 30;
+
+	// 자동 사격. 조준도 발사도 입력이 아니다 — 사거리 안에 들어오면 쏜다.
+	inline constexpr float kAttackRange = 8.0f;
+	inline constexpr int   kAttackDamage = 10;
+	inline constexpr float kAttackInterval = 0.5f;   // 초. 몬스터(30hp)는 3발.
 
 	// 이 시간 동안 입력이 안 오면 멈춘다. 30Hz 기준 7패킷 연속 유실.
 	inline constexpr int kInputHoldMs = 250;
@@ -115,8 +145,12 @@ namespace protocol {
 	// buf 에 스냅샷 본문을 쓴다. capacity 를 넘지 않게 개수를 줄인다.
 	// 실제로 쓴 바이트 수를 돌려준다.
 	std::size_t write_snapshot(std::uint8_t* buf, std::size_t capacity,
-		const PlayerState* players, std::size_t count);
+		const EntityState* entities, std::size_t count);
 
 	const char* to_string(PacketType t);
+
+	void write_event(std::uint8_t* buf, const EventPayload& e);
+	bool read_event(const std::uint8_t* buf, std::size_t size, EventPayload& out);
+	const char* to_string(EventKind k);
 
 } // namespace protocol

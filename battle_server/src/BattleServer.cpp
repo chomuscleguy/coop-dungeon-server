@@ -15,6 +15,8 @@ void BattleServer::start() {
 		<< socket_.local_endpoint().port()
 		<< " (tick " << protocol::kTickHz << "Hz)" << '\n';
 
+	world_.spawn_initial_monsters();
+
 	next_tick_ = std::chrono::steady_clock::now();      
 	last_tick_at_ = next_tick_;                          
 
@@ -97,7 +99,8 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 		protocol::InputPayload in;
 		if (protocol::read_input(data + protocol::kHeaderSize,
 			size - protocol::kHeaderSize, in)) {
-			c->player.set_input(in.move_x, in.move_y);
+			Player* p = world_.find_player(c->entity_id);     
+			if (p) p->set_input(in.move_x, in.move_y);      
 		}
 		return;      // 초당 30번 오므로 로그를 남기지 않는다
 	}
@@ -128,9 +131,12 @@ void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq
 	c.endpoint = from;
 	c.last_seen = std::chrono::steady_clock::now();
 	c.on_packet_received(seq);
+	c.entity_id = world_.add_player();      
 
 	connections_.emplace(from, c);
-	std::cout << "Handshake from " << from << " -> conn " << c.id << '\n';
+	std::cout << "Handshake from " << from
+		<< " -> conn " << c.id
+		<< " (entity " << c.entity_id << ")" << '\n';
 
 	send_to(connections_[from], protocol::PacketType::HandshakeAck, true);
 }
@@ -142,9 +148,11 @@ void BattleServer::send_to(Connection& c, protocol::PacketType type, bool reliab
 	h.ack = c.remote_sequence;
 	h.ack_bits = c.received_bits;
 	h.type = type;
-	c.on_packet_sent(h.sequence, type, reliable, attempts);
-
+	
 	protocol::write_header(send_buffer_.data(), h);
+
+	c.on_packet_sent(h.sequence, type, reliable, attempts, 
+		send_buffer_.data() + protocol::kHeaderSize, payload_size);
 
 	boost::system::error_code ec;
 	socket_.send_to(
@@ -192,12 +200,12 @@ void BattleServer::on_tick() {
 	tick_count_++;
 	ticks_this_second_++;
 
+	// 게임을 한 틱 진행한다. 네트워크와 분리된 부분.
+	world_.update(protocol::kTickSeconds);
+
 	// 매 틱: 재전송 검사. RTO 해상도가 1초에서 33ms 로 내려왔다.
 	for (auto& entry : connections_) {
 		Connection& c = entry.second;
-
-		// 게임 시뮬레이션: 마지막 입력을 고정 dt 만큼 적용한다
-		c.player.apply_input(protocol::kTickSeconds);
 
 		retransmit_buffer_.clear();
 		c.collect_timeouts(retransmit_buffer_);
@@ -206,10 +214,16 @@ void BattleServer::on_tick() {
 				<< protocol::to_string(p.type)
 				<< " seq=" << p.sequence
 				<< " try=" << static_cast<int>(p.attempts + 1) << '\n';
-			send_to(c, p.type, true, p.attempts + 1);
+
+			// 본문을 버퍼에 되살린 뒤 보낸다. 이게 없으면 빈 패킷이 나간다.
+			for (std::size_t i = 0; i < p.payload_size; ++i) {
+				send_buffer_[protocol::kHeaderSize + i] = p.payload[i];
+			}
+			send_to(c, p.type, true, p.attempts + 1, p.payload_size);
 		}
 	}
 
+	broadcast_events();
 	broadcast_snapshot();
 
 	if (tick_count_ % protocol::kTickHz == 0) {
@@ -217,25 +231,36 @@ void BattleServer::on_tick() {
 	}
 }
 
-void BattleServer::broadcast_snapshot() {
-	snapshot_buffer_.clear();
-	for (const auto& entry : connections_) {
-		protocol::PlayerState s;
-		s.id = entry.second.id;
-		s.x = entry.second.player.x;
-		s.y = entry.second.player.y;
-		snapshot_buffer_.push_back(s);
+void BattleServer::broadcast_events() {
+	if (connections_.empty()) return;
+	if (world_.died_this_tick.empty()) return;
+
+	for (std::uint32_t id : world_.died_this_tick) {
+		protocol::EventPayload e;
+		e.kind = protocol::EventKind::MonsterDied;
+		e.entity_id = id;
+
+		protocol::write_event(send_buffer_.data() + protocol::kHeaderSize, e);
+
+		for (auto& entry : connections_) {
+			send_to(entry.second, protocol::PacketType::Event,
+				true, 1, protocol::kEventPayloadSize);
+		}
 	}
+}
+
+void BattleServer::broadcast_snapshot() {
+	if (connections_.empty()) return;
+
+	world_.collect_states(snapshot_buffer_);
 	if (snapshot_buffer_.empty()) return;
 
-	// 본문은 한 번만 쓴다. 모두에게 같은 내용이 나간다.
 	std::size_t payload_size = protocol::write_snapshot(
 		send_buffer_.data() + protocol::kHeaderSize,
 		send_buffer_.size() - protocol::kHeaderSize,
 		snapshot_buffer_.data(), snapshot_buffer_.size());
 
 	for (auto& entry : connections_) {
-		// 헤더만 매번 다시 쓰인다 (seq/ack 가 연결마다 다르므로).
 		send_to(entry.second, protocol::PacketType::Snapshot,
 			false, 1, payload_size);
 	}
@@ -248,13 +273,16 @@ void BattleServer::on_second() {
 	std::cout << "[tick] " << ticks_this_second_ << "/s"
 		<< " worst_jitter=" << worst_jitter_ms_ << "ms"
 		<< " total=" << tick_count_ << '\n';
+
+	std::cout << "[world] monsters=" << world_.monster_count()
+		<< " kills=" << world_.total_kills << '\n';
+
 	worst_jitter_ms_ = 0.0;
 	ticks_this_second_ = 0;
 
 	std::vector<udp::endpoint> dead;
 	for (auto& entry : connections_) {
 		Connection& c = entry.second;
-
 		
 		std::cout << "[conn " << c.id << "] sent=" << c.total_sent
 			<< " acked=" << c.total_acked
@@ -264,13 +292,13 @@ void BattleServer::on_second() {
 			<< " rto=" << c.rto_ms() << "ms"
 			<< " gaveup=" << c.total_given_up << '\n';
 
-		std::cout << "[conn " << c.id << "] input=("
-			<< static_cast<int>(c.player.input_x) << ","
-			<< static_cast<int>(c.player.input_y) << ")"
-			<< " pos=(" << c.player.x << "," << c.player.y << ")" << '\n';
-
-		// 재전송 동작을 보려고 넣은 임시 코드. Step 16에서 진짜 이벤트로 바뀐다.
-		send_to(c, protocol::PacketType::Event, true);
+		const Player* p = world_.find_player(c.entity_id);
+		if (p) {
+			std::cout << "[conn " << c.id << "] entity=" << p->id
+				<< " input=(" << static_cast<int>(p->input_x) << ","
+				<< static_cast<int>(p->input_y) << ")"
+				<< " pos=(" << p->x << "," << p->y << ")" << '\n';
+		}
 
 		if (now - c.last_seen > limit) {
 			dead.push_back(entry.first);
@@ -278,8 +306,10 @@ void BattleServer::on_second() {
 	}
 
 	for (const udp::endpoint& ep : dead) {
-		std::cout << "Timeout: conn " << connections_[ep].id
-			<< " (" << ep << ")" << '\n';
+		Connection& c = connections_[ep];
+		std::cout << "Timeout: conn " << c.id
+			<< " (entity " << c.entity_id << ", " << ep << ")" << '\n';
+		world_.remove_player(c.entity_id);
 		connections_.erase(ep);
 	}
 }

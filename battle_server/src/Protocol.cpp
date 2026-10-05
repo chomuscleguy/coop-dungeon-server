@@ -67,26 +67,25 @@ namespace protocol {
 	}
 
 	std::size_t write_snapshot(std::uint8_t* buf, std::size_t capacity,
-		const PlayerState* players, std::size_t count) {
+		const EntityState* entities, std::size_t count) {
 		if (capacity < 1) return 0;
 
-		// 1400바이트를 넘으면 IP 단편화가 일어난다. 들어갈 만큼만 담는다.
-		// 자르는 쪽이 터지는 쪽보다 낫다.
-		std::size_t max_count = (capacity - 1) / kPlayerStateSize;
+		std::size_t max_count = (capacity - 1) / kEntityStateSize;
 		if (count > max_count) count = max_count;
-		if (count > 255) count = 255;          // 개수 필드가 uint8
+		if (count > 255) count = 255;
 
 		write_u8(buf, static_cast<std::uint8_t>(count));
 
 		std::size_t off = 1;
 		for (std::size_t i = 0; i < count; ++i) {
-			std::int16_t xi = static_cast<std::int16_t>(players[i].x * kPositionScale);
-			std::int16_t yi = static_cast<std::int16_t>(players[i].y * kPositionScale);
+			std::int16_t xi = static_cast<std::int16_t>(entities[i].x * kPositionScale);
+			std::int16_t yi = static_cast<std::int16_t>(entities[i].y * kPositionScale);
 
-			write_u32(buf + off + 0, players[i].id);
-			write_u16(buf + off + 4, static_cast<std::uint16_t>(xi));
-			write_u16(buf + off + 6, static_cast<std::uint16_t>(yi));
-			off += kPlayerStateSize;
+			write_u32(buf + off + 0, entities[i].id);
+			write_u8(buf + off + 4, static_cast<std::uint8_t>(entities[i].type));
+			write_u16(buf + off + 5, static_cast<std::uint16_t>(xi));
+			write_u16(buf + off + 7, static_cast<std::uint16_t>(yi));
+			off += kEntityStateSize;
 		}
 		return off;
 	}
@@ -100,6 +99,26 @@ namespace protocol {
 		case PacketType::Snapshot:     return "Snapshot";
 		case PacketType::Event:        return "Event";
 		default:                       return "Invalid";
+		}
+	}
+
+	void write_event(std::uint8_t* buf, const EventPayload& e) {
+		write_u8(buf + 0, static_cast<std::uint8_t>(e.kind));
+		write_u32(buf + 1, e.entity_id);
+	}
+
+	bool read_event(const std::uint8_t* buf, std::size_t size, EventPayload& out) {
+		if (size < kEventPayloadSize) return false;
+		out.kind = static_cast<EventKind>(read_u8(buf + 0));
+		out.entity_id = read_u32(buf + 1);
+		return true;
+	}
+
+	const char* to_string(EventKind k) {
+		switch (k) {
+		case EventKind::MonsterDied:    return "MonsterDied";
+		case EventKind::MonsterSpawned: return "MonsterSpawned";
+		default:                        return "Unknown";
 		}
 	}
 

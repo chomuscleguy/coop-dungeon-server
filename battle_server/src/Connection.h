@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
-#include <cmath>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -20,56 +20,14 @@ struct SentPacket {
 	// 유실됐을 때 다시 보낼지. 위치 같은 건 false (다음 것이 덮으니까).
 	bool reliable = false;
 	protocol::PacketType type = protocol::PacketType::Invalid;
+
+	// 재전송하려면 본문도 들고 있어야 한다. 신뢰 패킷만 채워진다.
+	// 지금 본문 있는 신뢰 패킷은 Event(5바이트)뿐이라 작게 잡았다.
+	std::array<std::uint8_t, 8> payload{};
+	std::uint8_t payload_size = 0;
+
 	bool resent = false;    // 이 기록으로 이미 다시 보냈는가 (중복 재전송 방지)
 	std::uint8_t attempts = 1;
-};
-
-// 이 연결이 조종하는 캐릭터. 지금은 연결과 1:1 이라 Connection 안에 둔다.
-// 몬스터가 생기는 Step 16에서 World 로 옮긴다.
-struct Player {
-	float x = 0.0f;
-	float y = 0.0f;
-
-	// 마지막으로 받은 입력. 틱마다 이걸 보고 위치를 갱신한다.
-	std::int8_t input_x = 0;
-	std::int8_t input_y = 0;
-	std::chrono::steady_clock::time_point last_input_at;
-
-	void set_input(std::int8_t ix, std::int8_t iy) {
-		input_x = ix;
-		input_y = iy;
-		last_input_at = std::chrono::steady_clock::now();
-	}
-
-	// 틱마다 호출. dt 는 실제 경과 시간이 아니라 항상 1/30 이다.
-	void apply_input(float dt) {
-		// 입력이 끊긴 지 오래면 멈춘다. 안 그러면 멈춘 클라이언트의
-		// 캐릭터가 계속 달린다 (연결은 5초 뒤에야 정리되므로).
-		auto since = std::chrono::steady_clock::now() - last_input_at;
-		if (since > std::chrono::milliseconds(protocol::kInputHoldMs)) {
-			input_x = 0;
-			input_y = 0;
-		}
-
-		float ix = input_x / 127.0f;
-		float iy = input_y / 127.0f;
-
-		// 대각선이 빨라지는 걸 막는다. (1,1)은 길이가 1.414다.
-		float len2 = ix * ix + iy * iy;
-		if (len2 > 1.0f) {
-			float len = std::sqrt(len2);
-			ix /= len;
-			iy /= len;
-		}
-
-		x += ix * protocol::kPlayerSpeed * dt;
-		y += iy * protocol::kPlayerSpeed * dt;
-
-		if (x > protocol::kMapHalfSize) x = protocol::kMapHalfSize;
-		if (x < -protocol::kMapHalfSize) x = -protocol::kMapHalfSize;
-		if (y > protocol::kMapHalfSize) y = protocol::kMapHalfSize;
-		if (y < -protocol::kMapHalfSize) y = -protocol::kMapHalfSize;
-	}
 };
 
 // UDP 클라이언트 하나. TCP의 Session 에 해당하지만 소켓을 갖지 않는다.
@@ -88,7 +46,9 @@ struct Connection {
 
 	std::chrono::steady_clock::time_point last_seen;
 
-	Player player;
+	// 이 연결이 조종하는 캐릭터의 엔티티 ID. 실체는 World 에 있다.
+	// 0 이면 아직 캐릭터가 없다는 뜻 (World 는 1부터 발급한다).
+	std::uint32_t entity_id = 0;
 
 	std::uint16_t take_sequence() { return next_sequence++; }
 
@@ -157,15 +117,24 @@ struct Connection {
 	// 패킷을 보낼 때마다 호출.
 	void on_packet_sent(std::uint16_t seq,
 		protocol::PacketType type, bool reliable,
-		std::uint8_t attempts = 1) {       
+		std::uint8_t attempts = 1,
+		const std::uint8_t* body = nullptr, std::size_t body_size = 0) {
 		SentPacket p;
 		p.sequence = seq;
 		p.sent_at = std::chrono::steady_clock::now();
 		p.reliable = reliable;
 		p.type = type;
-		p.attempts = attempts;             
+		p.attempts = attempts;
+
+		// 비신뢰 패킷은 다시 보낼 일이 없으니 본문을 안 들고 있는다.
+		// 30Hz 스냅샷을 전부 복사하면 그게 더 큰 낭비다.
+		if (reliable && body && body_size <= p.payload.size()) {
+			for (std::size_t i = 0; i < body_size; i++) p.payload[i] = body[i];
+			p.payload_size = static_cast<std::uint8_t>(body_size);
+		}
+
 		sent_packets.push_back(p);
-		++total_sent;
+		total_sent++;
 
 		if (sent_packets.size() > 256) {
 			sent_packets.pop_front();

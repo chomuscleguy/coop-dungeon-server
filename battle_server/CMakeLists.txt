@@ -24,6 +24,7 @@ add_executable(battle_server
     src/main.cpp
     src/BattleServer.cpp
     src/Protocol.cpp 
+    src/World.cpp
 )
 
 target_include_directories(battle_server PRIVATE src)
