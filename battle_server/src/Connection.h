@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -23,6 +24,54 @@ struct SentPacket {
 	std::uint8_t attempts = 1;
 };
 
+// 이 연결이 조종하는 캐릭터. 지금은 연결과 1:1 이라 Connection 안에 둔다.
+// 몬스터가 생기는 Step 16에서 World 로 옮긴다.
+struct Player {
+	float x = 0.0f;
+	float y = 0.0f;
+
+	// 마지막으로 받은 입력. 틱마다 이걸 보고 위치를 갱신한다.
+	std::int8_t input_x = 0;
+	std::int8_t input_y = 0;
+	std::chrono::steady_clock::time_point last_input_at;
+
+	void set_input(std::int8_t ix, std::int8_t iy) {
+		input_x = ix;
+		input_y = iy;
+		last_input_at = std::chrono::steady_clock::now();
+	}
+
+	// 틱마다 호출. dt 는 실제 경과 시간이 아니라 항상 1/30 이다.
+	void apply_input(float dt) {
+		// 입력이 끊긴 지 오래면 멈춘다. 안 그러면 멈춘 클라이언트의
+		// 캐릭터가 계속 달린다 (연결은 5초 뒤에야 정리되므로).
+		auto since = std::chrono::steady_clock::now() - last_input_at;
+		if (since > std::chrono::milliseconds(protocol::kInputHoldMs)) {
+			input_x = 0;
+			input_y = 0;
+		}
+
+		float ix = input_x / 127.0f;
+		float iy = input_y / 127.0f;
+
+		// 대각선이 빨라지는 걸 막는다. (1,1)은 길이가 1.414다.
+		float len2 = ix * ix + iy * iy;
+		if (len2 > 1.0f) {
+			float len = std::sqrt(len2);
+			ix /= len;
+			iy /= len;
+		}
+
+		x += ix * protocol::kPlayerSpeed * dt;
+		y += iy * protocol::kPlayerSpeed * dt;
+
+		if (x > protocol::kMapHalfSize) x = protocol::kMapHalfSize;
+		if (x < -protocol::kMapHalfSize) x = -protocol::kMapHalfSize;
+		if (y > protocol::kMapHalfSize) y = protocol::kMapHalfSize;
+		if (y < -protocol::kMapHalfSize) y = -protocol::kMapHalfSize;
+	}
+};
+
 // UDP 클라이언트 하나. TCP의 Session 에 해당하지만 소켓을 갖지 않는다.
 // 소켓은 서버에 하나뿐이고, 이건 "누가 어디서 보내는가"의 기록이다.
 struct Connection {
@@ -38,6 +87,8 @@ struct Connection {
 	bool has_received_any = false;              // 첫 패킷인지 구분
 
 	std::chrono::steady_clock::time_point last_seen;
+
+	Player player;
 
 	std::uint16_t take_sequence() { return next_sequence++; }
 

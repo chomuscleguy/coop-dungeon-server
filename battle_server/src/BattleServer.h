@@ -3,6 +3,7 @@
 #include "Connection.h"   
 #include "Protocol.h"     
 
+#include <chrono>
 #include <array>
 #include <vector>
 #include <cstdint>
@@ -24,12 +25,17 @@ private:
     void handle_handshake(const boost::asio::ip::udp::endpoint& from, std::uint16_t seq);
     Connection* find_connection(const boost::asio::ip::udp::endpoint& from);
 
-    // 헤더만 있는 패킷을 보낸다 (payload 없음)
+    // payload 는 호출 전에 send_buffer_ 의 헤더 뒤쪽에 써둬야 한다.
+    // 헤더(0~10)와 본문(11~)이 겹치지 않으므로 순서는 상관없다.
     void send_to(Connection& c, protocol::PacketType type, bool reliable,
-        std::uint8_t attempts = 1);
+        std::uint8_t attempts = 1, std::size_t payload_size = 0);
+
+    void broadcast_snapshot();
 
     void start_tick_timer();            
     void on_tick();
+
+    void on_second();                   // 30틱에 한 번 하는 일
 
     boost::asio::ip::udp::socket socket_;
     boost::asio::steady_timer tick_timer_;
@@ -45,4 +51,17 @@ private:
     // 멤버로 둔다. 30Hz × 4인이면 초당 120번 호출된다.
     std::vector<SentPacket> lost_buffer_;
     std::vector<SentPacket> retransmit_buffer_;
+
+    std::vector<protocol::PlayerState> snapshot_buffer_;
+
+    // 다음 틱의 목표 시각. "지금부터 33ms"가 아니라 "이 시각에"로 걸어야
+    // 처리 시간이 누적되지 않는다.
+    std::chrono::steady_clock::time_point next_tick_;
+    std::chrono::steady_clock::time_point last_tick_at_;
+
+    std::uint64_t tick_count_ = 0;
+
+    // 틱 간격이 목표에서 얼마나 벗어났는지 (1초마다 리셋)
+    double worst_jitter_ms_ = 0.0;
+    int ticks_this_second_ = 0;
 };

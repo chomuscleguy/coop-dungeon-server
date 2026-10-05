@@ -57,6 +57,40 @@ namespace protocol {
 		return true;
 	}
 
+	bool read_input(const std::uint8_t* buf, std::size_t size, InputPayload& out) {
+		if (size < kInputPayloadSize) return false;
+
+		// uint8 로 읽어서 int8 로 해석한다. 128~255 가 -128~-1 이 된다.
+		out.move_x = static_cast<std::int8_t>(read_u8(buf + 0));
+		out.move_y = static_cast<std::int8_t>(read_u8(buf + 1));
+		return true;
+	}
+
+	std::size_t write_snapshot(std::uint8_t* buf, std::size_t capacity,
+		const PlayerState* players, std::size_t count) {
+		if (capacity < 1) return 0;
+
+		// 1400바이트를 넘으면 IP 단편화가 일어난다. 들어갈 만큼만 담는다.
+		// 자르는 쪽이 터지는 쪽보다 낫다.
+		std::size_t max_count = (capacity - 1) / kPlayerStateSize;
+		if (count > max_count) count = max_count;
+		if (count > 255) count = 255;          // 개수 필드가 uint8
+
+		write_u8(buf, static_cast<std::uint8_t>(count));
+
+		std::size_t off = 1;
+		for (std::size_t i = 0; i < count; ++i) {
+			std::int16_t xi = static_cast<std::int16_t>(players[i].x * kPositionScale);
+			std::int16_t yi = static_cast<std::int16_t>(players[i].y * kPositionScale);
+
+			write_u32(buf + off + 0, players[i].id);
+			write_u16(buf + off + 4, static_cast<std::uint16_t>(xi));
+			write_u16(buf + off + 6, static_cast<std::uint16_t>(yi));
+			off += kPlayerStateSize;
+		}
+		return off;
+	}
+
 	const char* to_string(PacketType t) {
 		switch (t) {
 		case PacketType::Handshake:    return "Handshake";
