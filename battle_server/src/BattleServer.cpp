@@ -15,8 +15,6 @@ void BattleServer::start() {
 		<< socket_.local_endpoint().port()
 		<< " (tick " << protocol::kTickHz << "Hz)" << '\n';
 
-	world_.spawn_initial_monsters();
-
 	next_tick_ = std::chrono::steady_clock::now();      
 	last_tick_at_ = next_tick_;                          
 
@@ -224,6 +222,7 @@ void BattleServer::on_tick() {
 	}
 
 	broadcast_events();
+	broadcast_room_state();
 	broadcast_snapshot();
 
 	if (tick_count_ % protocol::kTickHz == 0) {
@@ -246,6 +245,41 @@ void BattleServer::broadcast_events() {
 			send_to(entry.second, protocol::PacketType::Event,
 				true, 1, protocol::kEventPayloadSize);
 		}
+	}
+}
+
+void BattleServer::broadcast_room_state() {
+	if (connections_.empty()) return;
+
+	protocol::RoomStatePayload s;
+	s.room = static_cast<std::uint8_t>(world_.room_index);
+	s.wave = static_cast<std::int8_t>(world_.wave_index);
+	s.phase = world_.phase;
+	s.monsters = static_cast<std::uint8_t>(
+		world_.monster_count() > 255 ? 255 : world_.monster_count());
+	s.at_door = static_cast<std::uint8_t>(world_.at_door);
+	s.players = static_cast<std::uint8_t>(world_.player_count());
+	s.countdown_ms = static_cast<std::uint16_t>(
+		world_.transition_timer > 0.0f ? world_.transition_timer * 1000.0f : 0);
+
+	// 카운트다운은 매 틱 바뀌므로 비교에서 뺀다. 그것만 바뀌었으면
+	// 1초에 한 번만 보내면 된다 — 클라가 자기 시계로 세면 되니까.
+	bool changed =
+		s.room != last_room_state_.room ||
+		s.wave != last_room_state_.wave ||
+		s.phase != last_room_state_.phase ||
+		s.at_door != last_room_state_.at_door ||
+		s.players != last_room_state_.players;
+
+	bool periodic = (tick_count_ % protocol::kTickHz == 0);
+	if (!changed && !periodic) return;
+
+	last_room_state_ = s;
+
+	protocol::write_room_state(send_buffer_.data() + protocol::kHeaderSize, s);
+	for (auto& entry : connections_) {
+		send_to(entry.second, protocol::PacketType::RoomState,
+			false, 1, protocol::kRoomStateSize);
 	}
 }
 
@@ -274,7 +308,15 @@ void BattleServer::on_second() {
 		<< " worst_jitter=" << worst_jitter_ms_ << "ms"
 		<< " total=" << tick_count_ << '\n';
 
-	std::cout << "[world] monsters=" << world_.monster_count()
+	const char* phase_name =
+		world_.phase == protocol::RoomPhase::Fighting ? "Fighting" :
+		world_.phase == protocol::RoomPhase::Cleared ? "Cleared" : "Transitioning";
+
+	std::cout << "[world] room=" << world_.room_index
+		<< " wave=" << world_.wave_index
+		<< " phase=" << phase_name
+		<< " monsters=" << world_.monster_count()
+		<< " atdoor=" << world_.at_door
 		<< " kills=" << world_.total_kills << '\n';
 
 	worst_jitter_ms_ = 0.0;

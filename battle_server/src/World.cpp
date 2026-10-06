@@ -1,10 +1,12 @@
 #include "World.h"
+#include <iostream>
 
 std::uint32_t World::add_player() {
     Player p;
     p.id = next_entity_id_++;
     p.last_input_at = std::chrono::steady_clock::now();
     players_.push_back(p);
+
     return p.id;
 }
 
@@ -29,20 +31,153 @@ Player* World::find_player(std::uint32_t id) {
 
 std::uint32_t World::spawn_monster(float x, float y) {
     Monster m;
-    m.id = next_entity_id_++;      // 플레이어와 같은 ID 공간을 쓴다
+    m.id = next_entity_id_++;
     m.x = x;
     m.y = y;
+    m.hp = monster_hp_for_room(room_index); 
     monsters_.push_back(m);
     return m.id;
 }
 
-void World::spawn_initial_monsters() {
-    // 반지름 20 원 위에 다섯 마리. 임시 코드다.
-    const int count = 5;
+int World::monsters_for_wave(int room, int wave) const {
+    // 방마다 +4, 웨이브마다 +4. 방 10에서 60마리로 154 한계 아래.
+    // 곱하기가 아니라 더하기인 이유: 곱하면 5번째 방에서 수백 마리가 된다.
+    return protocol::kBaseMonstersPerWave + room * 4 + wave * 4;
+}
+
+int World::monster_hp_for_room(int room) const {
+    return protocol::kMonsterHp + room * protocol::kMonsterHpPerRoom;
+}
+
+void World::spawn_wave() {
+    // 파티 한가운데를 중심으로 삼는다. 맵 중심이 아니다 —
+    // 구석에 몰려 있으면 반대편 몬스터가 80유닛을 걸어오게 된다.
+    float cx = 0.0f;
+    float cy = 0.0f;
+    if (!players_.empty()) {
+        for (const Player& p : players_) { cx += p.x; cy += p.y; }
+        cx /= players_.size();
+        cy /= players_.size();
+    }
+
+    int count = monsters_for_wave(room_index, wave_index);
+
     for (int i = 0; i < count; ++i) {
         float angle = 6.2831853f * i / count;
-        spawn_monster(std::cos(angle) * 20.0f, std::sin(angle) * 20.0f);
+        float x = cx + std::cos(angle) * protocol::kSpawnRadius;
+        float y = cy + std::sin(angle) * protocol::kSpawnRadius;
+
+        // 맵 밖은 가장자리로 당긴다. 파티가 구석에 있으면 한쪽에
+        // 몰려서 나오는데, "열린 쪽에서 몰려온다"로 읽혀서 자연스럽다.
+        if (x > protocol::kMapHalfSize) x = protocol::kMapHalfSize;
+        if (x < -protocol::kMapHalfSize) x = -protocol::kMapHalfSize;
+        if (y > protocol::kMapHalfSize) y = protocol::kMapHalfSize;
+        if (y < -protocol::kMapHalfSize) y = -protocol::kMapHalfSize;
+        
+        spawn_monster(x, y);
     }
+}
+
+void World::reset_player_positions() {
+    int n = static_cast<int>(players_.size());
+    if (n == 0) return;
+
+    // 입구 근처에 작은 원으로 흩어 놓는다. 한 점에 겹치면
+    // 몬스터가 전부 한 사람만 쫓는다.
+    for (int i = 0; i < n; ++i) {
+        float angle = 6.2831853f * i / n;
+        players_[i].x = protocol::kRoomEntryX + std::cos(angle) * 2.0f;
+        players_[i].y = std::sin(angle) * 2.0f;
+    }
+}
+
+int World::count_at_door() const {
+    int n = 0;
+    float r2 = protocol::kDoorRadius * protocol::kDoorRadius;
+
+    for (const Player& p : players_) {
+        float dx = p.x - protocol::kDoorX;
+        float dy = p.y - protocol::kDoorY;
+        if (dx * dx + dy * dy <= r2) ++n;
+    }
+    return n;
+}
+
+void World::update_door(float dt) {
+    at_door = count_at_door();
+    int total = static_cast<int>(players_.size());
+    if (total == 0) return;
+
+    // 전원 도달 -> 기다릴 이유가 없다.
+    if (at_door == total) {
+        std::cout << "[world] all " << total << " at door - advancing now\n";
+        next_room();
+        return;
+    }
+
+    // 과반수 판정. 4명이면 3명부터, 3명이면 2명부터, 1명이면 1명.
+    // at_door * 2 > total 로 쓰면 나눗셈과 소수점을 피할 수 있다.
+    bool majority = (at_door * 2 > total);
+
+    if (!majority) {
+        // 빠져나갔다. 카운트다운을 취소한다.
+        if (phase == protocol::RoomPhase::Transitioning) {
+            std::cout << "[world] majority lost - countdown cancelled\n";
+            phase = protocol::RoomPhase::Cleared;
+            transition_timer = 0.0f;
+        }
+        return;
+    }
+
+    if (phase == protocol::RoomPhase::Cleared) {
+        phase = protocol::RoomPhase::Transitioning;
+        transition_timer = protocol::kTransitionSeconds;
+        std::cout << "[world] majority at door (" << at_door << "/" << total
+            << ") - countdown " << transition_timer << "s\n";
+        return;
+    }
+
+    transition_timer -= dt;
+    if (transition_timer <= 0.0f) {
+        std::cout << "[world] countdown done - advancing\n";
+        next_room();
+    }
+}
+
+void World::update_phase(float dt) {
+    // 아무도 없으면 던전이 흐르지 않는다. 첫 플레이어가 들어오면
+    // 다음 틱에 wave_index 가 -1 에서 0 이 되면서 시작된다.
+    if (players_.empty()) return;
+
+    // 클리어 이후의 단계들은 여기서 처리하고 끝낸다.
+    if (phase == protocol::RoomPhase::Cleared ||
+        phase == protocol::RoomPhase::Transitioning) {
+        update_door(dt);
+        return;
+    }
+
+    // 아직 몬스터가 남아 있으면 할 일이 없다.
+    if (!monsters_.empty()) return;
+
+    // 웨이브 사이 쉬는 중이면 시간만 깎는다.
+    if (wave_break > 0.0f) {
+        wave_break -= dt;
+        if (wave_break > 0.0f) return;
+    }
+
+    wave_index++;
+
+    if (wave_index >= protocol::kWavesPerRoom) {
+        phase = protocol::RoomPhase::Cleared;
+        std::cout << "[world] room " << room_index << " cleared\n";
+        return;
+    }
+
+    spawn_wave();
+    wave_break = protocol::kWaveBreakSeconds;
+    std::cout << "[world] room " << room_index
+        << " wave " << wave_index
+        << " (" << monsters_.size() << " monsters)\n";
 }
 
 void World::update(float dt) {
@@ -77,6 +212,7 @@ void World::update(float dt) {
     }
 
     resolve_attacks(dt);
+    update_phase(dt);
 }
 
 const Player* World::nearest_player(float x, float y) const {
@@ -167,4 +303,31 @@ void World::collect_states(std::vector<protocol::EntityState>& out) const {
         s.y = m.y;
         out.push_back(s);
     }
+
+    // 문은 클리어된 뒤에만 보인다. 엔티티 ID 0 은 아무도 안 쓰므로
+    // "진짜 객체가 아닌 것"의 표식으로 쓴다.
+    if (phase != protocol::RoomPhase::Fighting) {
+        protocol::EntityState s;
+        s.id = 0;
+        s.type = protocol::EntityType::Door;
+        s.x = protocol::kDoorX;
+        s.y = protocol::kDoorY;
+        out.push_back(s);
+    }
+}
+
+void World::next_room() {
+    ++room_index;
+    wave_index = -1;
+    phase = protocol::RoomPhase::Fighting;
+    transition_timer = 0.0f;
+    wave_break = 0.0f;
+    at_door = 0;
+
+    monsters_.clear();
+
+    reset_player_positions();
+
+    std::cout << "[world] --> room " << room_index
+        << " (monster hp " << monster_hp_for_room(room_index) << ")\n";
 }

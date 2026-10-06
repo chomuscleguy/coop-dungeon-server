@@ -32,6 +32,7 @@ private:
 
     void broadcast_snapshot();
     void broadcast_events();
+    void broadcast_room_state();
 
     void start_tick_timer();            
     void on_tick();
@@ -63,6 +64,9 @@ private:
     std::chrono::steady_clock::time_point last_tick_at_;
 
     std::uint64_t tick_count_ = 0;
+
+    // 직전에 보낸 방 상태. 바뀌었을 때만 즉시 보내기 위한 비교용.
+    protocol::RoomStatePayload last_room_state_{};
 
     // 틱 간격이 목표에서 얼마나 벗어났는지 (1초마다 리셋)
     double worst_jitter_ms_ = 0.0;

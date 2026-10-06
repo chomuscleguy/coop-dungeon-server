@@ -90,6 +90,29 @@ namespace protocol {
 		return off;
 	}
 
+	void write_room_state(std::uint8_t* buf, const RoomStatePayload& s) {
+		write_u8(buf + 0, s.room);
+		write_u8(buf + 1, static_cast<std::uint8_t>(s.wave));   // -1 은 0xFF
+		write_u8(buf + 2, static_cast<std::uint8_t>(s.phase));
+		write_u8(buf + 3, s.monsters);
+		write_u8(buf + 4, s.at_door);
+		write_u8(buf + 5, s.players);
+		write_u16(buf + 6, s.countdown_ms);
+	}
+
+	bool read_room_state(const std::uint8_t* buf, std::size_t size,
+		RoomStatePayload& out) {
+		if (size < kRoomStateSize) return false;
+		out.room = read_u8(buf + 0);
+		out.wave = static_cast<std::int8_t>(read_u8(buf + 1));
+		out.phase = static_cast<RoomPhase>(read_u8(buf + 2));
+		out.monsters = read_u8(buf + 3);
+		out.at_door = read_u8(buf + 4);
+		out.players = read_u8(buf + 5);
+		out.countdown_ms = read_u16(buf + 6);
+		return true;
+	}
+
 	const char* to_string(PacketType t) {
 		switch (t) {
 		case PacketType::Handshake:    return "Handshake";
@@ -98,6 +121,7 @@ namespace protocol {
 		case PacketType::Input:        return "Input";
 		case PacketType::Snapshot:     return "Snapshot";
 		case PacketType::Event:        return "Event";
+		case PacketType::RoomState:    return "RoomState";
 		default:                       return "Invalid";
 		}
 	}

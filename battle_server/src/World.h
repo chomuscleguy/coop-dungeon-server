@@ -74,19 +74,26 @@ public:
 
     std::uint32_t spawn_monster(float x, float y);
 
-    // 서버 시작 시 한 번. Step 17 에서 웨이브로 바뀐다.
-    void spawn_initial_monsters();
-
     // 한 틱 진행한다.
     void update(float dt);
 
     // 이 월드에서 지금까지 죽은 몬스터 수. 로그용.
     std::uint32_t total_kills = 0;
 
+    // --- 방 진행 상태 ---
+    protocol::RoomPhase phase = protocol::RoomPhase::Fighting;
+    int room_index = 0;         // 0부터. 깊어질수록 어려워진다
+    int wave_index = -1;        // -1 = 아직 시작 안 함. 첫 틱에 0이 된다
+    float wave_break = 0.0f;    // 다음 웨이브까지 남은 시간
+
+    float transition_timer = 0.0f;   // 남은 카운트다운
+    int at_door = 0;                 // 문에 서 있는 인원 (로그용)
+
     // 이번 틱에 죽은 몬스터들. BattleServer 가 읽고 비운다.
     std::vector<std::uint32_t> died_this_tick;
 
     std::size_t monster_count() const { return monsters_.size(); }
+    std::size_t player_count() const { return players_.size(); }
 
     // 스냅샷에 담을 상태를 모은다.
     void collect_states(std::vector<protocol::EntityState>& out) const;
@@ -106,4 +113,20 @@ private:
     // 엔티티 ID 는 World 가 발급한다. 몬스터도 같은 공간을 쓸 것이므로
     // 연결 ID(BattleServer 가 발급)와는 별개여야 한다.
     std::uint32_t next_entity_id_ = 1;
+
+    // 이 방/웨이브에 몇 마리를 낼지
+    int monsters_for_wave(int room, int wave) const;
+
+    void spawn_wave();
+    void update_phase(float dt);
+
+    // 문 앞에 서 있는 플레이어 수를 센다.
+    int count_at_door() const;
+
+    void update_door(float dt);
+
+    void next_room();
+
+    int monster_hp_for_room(int room) const;
+    void reset_player_positions();
 };

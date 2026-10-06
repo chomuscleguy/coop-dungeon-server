@@ -23,6 +23,7 @@ namespace protocol {
 		Input = 4,           // 클라 -> 서버: 이동 입력
 		Snapshot = 5,        // 서버 -> 클라: 월드 상태
 		Event = 6,           // 서버 -> 클라: 한 번뿐인 사건 (신뢰)
+		RoomState = 7,       // 서버 -> 클라: 방 진행 상황 (비신뢰, 주기적)
 	};
 
 	struct PacketHeader {
@@ -48,6 +49,7 @@ namespace protocol {
 	enum class EntityType : std::uint8_t {
 		Player = 0,
 		Monster = 1,
+		Door = 2,
 	};
 
 	// 스냅샷에 담기는 엔티티 하나.
@@ -72,6 +74,26 @@ namespace protocol {
 	};
 
 	inline constexpr std::size_t kEventPayloadSize = 5;   // 1 + 4
+
+	// 방의 진행 단계. 틱이 이 값을 바꾼다 (로비의 RoomPhase 는 메시지가 바꿨다).
+	enum class RoomPhase : std::uint8_t {
+		Fighting = 0,       // 웨이브 진행 중
+		Cleared = 1,        // 전부 격파. 문이 열렸다
+		Transitioning = 2,  // 과반수 도달. 카운트다운 중
+	};
+
+	// 방 진행 상황. 스냅샷처럼 계속 보내므로 재전송하지 않는다.
+	struct RoomStatePayload {
+		std::uint8_t room = 0;
+		std::int8_t  wave = -1;        // -1 = 시작 전
+		RoomPhase    phase = RoomPhase::Fighting;
+		std::uint8_t monsters = 0;     // 남은 수 (255 이상이면 255)
+		std::uint8_t at_door = 0;
+		std::uint8_t players = 0;
+		std::uint16_t countdown_ms = 0;
+	};
+
+	inline constexpr std::size_t kRoomStateSize = 8;   // 1+1+1+1+1+1+2
 
 	// 좌표를 int16 으로 담을 때의 배율. 맵이 -50~50 이므로
 	// 100배 하면 -5000~5000 이고 정밀도는 0.01 유닛이다.
@@ -103,7 +125,7 @@ namespace protocol {
 
 	// 플레이어(5.0)보다 느리다. 도망칠 수 있어야 하고, 그래야
 	// "몰려오는 걸 뚫고 지나간다"가 성립한다.
-	inline constexpr float kMonsterSpeed = 2.0f;
+	inline constexpr float kMonsterSpeed = 2.5f;        // 2.0 -> 2.5
 
 	inline constexpr int kMonsterHp = 30;
 
@@ -111,6 +133,35 @@ namespace protocol {
 	inline constexpr float kAttackRange = 8.0f;
 	inline constexpr int   kAttackDamage = 10;
 	inline constexpr float kAttackInterval = 0.5f;   // 초. 몬스터(30hp)는 3발.
+
+	inline constexpr int kWavesPerRoom = 3;
+
+	// 웨이브 사이 숨 돌릴 틈. 끝나자마자 다음이 나오면 정신없다.
+	inline constexpr float kWaveBreakSeconds = 2.0f;
+
+	// 첫 웨이브 몬스터 수. 웨이브마다, 방마다 늘어난다.
+	inline constexpr int kBaseMonstersPerWave = 12;
+
+	// 몬스터는 맵 중심이 아니라 파티 주변에 나온다. 화면 밖에서 나타나
+	// 좁혀 들어오는 거리.
+	inline constexpr float kSpawnRadius = 25.0f;
+
+	// 방이 깊어질수록 단단해진다. 수를 늘리는 것보다 이쪽이 낫다 —
+	// 수는 1400바이트 스냅샷에 묶여 있다.
+	inline constexpr int kMonsterHpPerRoom = 10;
+
+	// 새 방에 들어가면 왼쪽 입구에서 시작한다 (문은 오른쪽 x=40).
+	inline constexpr float kRoomEntryX = -30.0f;
+
+	// 문은 맵 오른쪽 끝에 생긴다. 방마다 같은 자리 (지금은).
+	inline constexpr float kDoorX = 40.0f;
+	inline constexpr float kDoorY = 0.0f;
+
+	// 이 거리 안에 들어오면 "문에 도달"로 본다.
+	inline constexpr float kDoorRadius = 5.0f;
+
+	// 과반수가 모였을 때 기다려주는 시간.
+	inline constexpr float kTransitionSeconds = 5.0f;
 
 	// 이 시간 동안 입력이 안 오면 멈춘다. 30Hz 기준 7패킷 연속 유실.
 	inline constexpr int kInputHoldMs = 250;
@@ -152,5 +203,9 @@ namespace protocol {
 	void write_event(std::uint8_t* buf, const EventPayload& e);
 	bool read_event(const std::uint8_t* buf, std::size_t size, EventPayload& out);
 	const char* to_string(EventKind k);
+
+	void write_room_state(std::uint8_t* buf, const RoomStatePayload& s);
+	bool read_room_state(const std::uint8_t* buf, std::size_t size,
+		RoomStatePayload& out);
 
 } // namespace protocol
