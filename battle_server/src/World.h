@@ -22,6 +22,27 @@ struct Player {
     // 다음 사격까지 남은 시간(초). 0 이하면 쏠 수 있다.
     float attack_timer = 0.0f;
 
+    int hp = protocol::kPlayerMaxHp;
+    protocol::EntityLife life = protocol::EntityLife::Alive;
+
+    float down_timer = 0.0f;        // Dead 까지 남은 시간
+    float revive_progress = 0.0f;   // 0 ~ kReviveSeconds
+
+    bool is_alive() const { return life == protocol::EntityLife::Alive; }
+
+    // 쓰러진 동안에는 이 칸이 부활 진행도를 나른다.
+    // 체력은 어차피 0이라 쓸 자리가 비어 있다. 
+    std::uint8_t hp_percent() const {
+        if (life == protocol::EntityLife::Down) {
+            int pct = static_cast<int>(
+                revive_progress * 100.0f / protocol::kReviveSeconds);
+            return static_cast<std::uint8_t>(pct > 100 ? 100 : (pct < 0 ? 0 : pct));
+        }
+        if (hp <= 0) return 0;
+        int pct = hp * 100 / protocol::kPlayerMaxHp;
+        return static_cast<std::uint8_t>(pct > 100 ? 100 : pct);
+    }
+
     void set_input(std::int8_t ix, std::int8_t iy) {
         input_x = ix;
         input_y = iy;
@@ -29,6 +50,7 @@ struct Player {
     }
 
     void apply_input(float dt) {
+        if (!is_alive()) return;
         auto since = std::chrono::steady_clock::now() - last_input_at;
         if (since > std::chrono::milliseconds(protocol::kInputHoldMs)) {
             input_x = 0;
@@ -55,12 +77,13 @@ struct Player {
     }
 };
 
-// 몬스터. 연결이 없다 — 이 게임에서 처음 등장하는, 네트워크 없는 객체다.
 struct Monster {
     std::uint32_t id = 0;
     float x = 0.0f;
     float y = 0.0f;
     int hp = protocol::kMonsterHp;
+    int max_hp = protocol::kMonsterHp;  
+    float attack_timer = 0.0f;    
 };
 
 // 전투 공간. 플레이어와 (곧) 몬스터가 여기 산다.
@@ -94,6 +117,10 @@ public:
 
     std::size_t monster_count() const { return monsters_.size(); }
     std::size_t player_count() const { return players_.size(); }
+
+    // 전멸 시각. 로비에 결과를 보낼 때 쓴다 (18d).
+    std::uint32_t final_room = 0;
+    std::uint32_t final_wave = 0;
 
     // 스냅샷에 담을 상태를 모은다.
     void collect_states(std::vector<protocol::EntityState>& out) const;
@@ -129,4 +156,10 @@ private:
 
     int monster_hp_for_room(int room) const;
     void reset_player_positions();
+
+    void resolve_monster_attacks(float dt);
+
+    void update_downed(float dt);
+
+    bool all_down() const;
 };

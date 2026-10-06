@@ -1,13 +1,20 @@
 #include "BattleServer.h"
 #include "Protocol.h"  
 #include <iostream>
+#include <sstream>
+#include <utility>
 #include <vector>
 
 using boost::asio::ip::udp;
 
-BattleServer::BattleServer(boost::asio::io_context& io, unsigned short port)
+BattleServer::BattleServer(boost::asio::io_context& io, unsigned short port,
+	std::string lobby_host, std::string lobby_port, std::string secret)
 	: socket_(io, udp::endpoint(udp::v4(), port)),
-	tick_timer_(io) {
+	tick_timer_(io),
+	io_(io),
+	lobby_host_(std::move(lobby_host)),
+	lobby_port_(std::move(lobby_port)),
+	secret_(std::move(secret)) {
 }
 
 void BattleServer::start() {
@@ -225,6 +232,14 @@ void BattleServer::on_tick() {
 	broadcast_room_state();
 	broadcast_snapshot();
 
+	// 상태가 "바뀐" 순간에만 한 번 보낸다. 매 틱 보내면 로비가 터진다.
+	if (world_.phase != last_phase_) {
+		if (world_.phase == protocol::RoomPhase::Failed) {
+			report_result("wipe");
+		}
+		last_phase_ = world_.phase;
+	}
+
 	if (tick_count_ % protocol::kTickHz == 0) {
 		on_second();
 	}
@@ -283,6 +298,23 @@ void BattleServer::broadcast_room_state() {
 	}
 }
 
+void BattleServer::report_result(const char* result) {
+	// 손으로 만든다. 전부 정수와 고정 문자열이라 이스케이프할 것이 없다.
+	// 사용자 이름 같은 문자열이 들어오면 이 방식은 못 쓴다.
+	std::ostringstream os;
+	os << "{\"type\":\"DungeonResult\",\"data\":{"
+		<< "\"secret\":\"" << secret_ << "\","
+		<< "\"result\":\"" << result << "\","
+		<< "\"room\":" << world_.final_room << ","
+		<< "\"wave\":" << world_.final_wave << ","
+		<< "\"kills\":" << world_.total_kills << ","
+		<< "\"players\":" << world_.player_count()
+		<< "}}";
+
+	std::cout << "[lobby] -> " << os.str() << '\n';
+	LobbyReport::send(io_, lobby_host_, lobby_port_, os.str());
+}
+
 void BattleServer::broadcast_snapshot() {
 	if (connections_.empty()) return;
 
@@ -308,9 +340,13 @@ void BattleServer::on_second() {
 		<< " worst_jitter=" << worst_jitter_ms_ << "ms"
 		<< " total=" << tick_count_ << '\n';
 
-	const char* phase_name =
-		world_.phase == protocol::RoomPhase::Fighting ? "Fighting" :
-		world_.phase == protocol::RoomPhase::Cleared ? "Cleared" : "Transitioning";
+	const char* phase_name = "?";
+	switch (world_.phase) {
+	case protocol::RoomPhase::Fighting:      phase_name = "Fighting"; break;
+	case protocol::RoomPhase::Cleared:       phase_name = "Cleared"; break;
+	case protocol::RoomPhase::Transitioning: phase_name = "Transitioning"; break;
+	case protocol::RoomPhase::Failed:        phase_name = "FAILED"; break;
+	}
 
 	std::cout << "[world] room=" << world_.room_index
 		<< " wave=" << world_.wave_index

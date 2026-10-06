@@ -8,6 +8,26 @@ services:
       - "7777:7777"
     environment:
       - GAME_SERVER_PORT=7777
+      - BATTLE_SECRET=${BATTLE_SECRET:-dev-secret}
     # 정상 종료에 시간을 조금 더 준다. 기본 10초면 대개 충분하지만,
     # 접속자가 많을 때 전부 닫는 데 여유를 둔다.
+    stop_grace_period: 30s
+
+  battle-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.battle
+    image: coop-dungeon-battle
+    container_name: battle-server
+    restart: unless-stopped
+    ports:
+      - "7778:7778/udp"
+    environment:
+      - BATTLE_SERVER_PORT=7778
+      # compose 가 만드는 기본 네트워크 안에서는 서비스 이름이 호스트 이름이다.
+      - LOBBY_HOST=game-server
+      - LOBBY_PORT=7777
+      - BATTLE_SECRET=${BATTLE_SECRET:-dev-secret}
+    depends_on:
+      - game-server
     stop_grace_period: 30s

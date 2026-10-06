@@ -457,6 +457,12 @@ private:
                 return;
             }
 
+            // 배틀 서버가 보내는 결과. 사람이 아니라 서버라 로그인할 수 없다.
+            if (type == "DungeonResult") {
+                handle_dungeon_result(data);
+                return;
+            }
+
             // 그 외 모든 메시지는 로그인 필수
             if (!logged_in_) {
                 send_error("login required");
@@ -473,7 +479,6 @@ private:
             if (type == "RoomLeave") { handle_room_leave();      return; }
             if (type == "RoomList") { handle_room_list();       return; }
             if (type == "ChatSend") { handle_chat_send(data);   return; }
-            if (type == "ChatSend") { handle_chat_send(data);   return; }
             if (type == "MatchEnqueue") { handle_match_enqueue(); return; } 
             if (type == "MatchCancel") { handle_match_cancel();  return; } 
             if (type == "BossAttack") { handle_boss_attack();    return; }
@@ -489,6 +494,24 @@ private:
         catch (const std::exception& e) {
             std::cerr << "JSON parse error: " << e.what() << '\n';
         }
+    }
+
+    void handle_dungeon_result(const nlohmann::json& data) {
+        // 로그인 없이 받는 유일한 경로라, 공유 시크릿으로 막는다.
+        // 이게 없으면 누구나 7777 에 붙어 가짜 결과를 밀어 넣을 수 있다.
+        const char* env = std::getenv("BATTLE_SECRET");
+        std::string expected = (env && *env) ? env : "dev-secret";
+
+        if (data.value("secret", "") != expected) {
+            std::cerr << "DungeonResult rejected: bad secret\n";
+            return;      // 응답도 안 한다. 맞췄는지 알려줄 이유가 없다
+        }
+
+        std::cout << "[dungeon] result=" << data.value("result", "?")
+            << " room=" << data.value("room", 0)
+            << " wave=" << data.value("wave", 0)
+            << " kills=" << data.value("kills", 0)
+            << " players=" << data.value("players", 0) << '\n';
     }
 
     void send_error(const std::string& message) {

@@ -35,6 +35,7 @@ std::uint32_t World::spawn_monster(float x, float y) {
     m.x = x;
     m.y = y;
     m.hp = monster_hp_for_room(room_index); 
+    m.max_hp = m.hp;
     monsters_.push_back(m);
     return m.id;
 }
@@ -145,6 +146,7 @@ void World::update_door(float dt) {
 }
 
 void World::update_phase(float dt) {
+    if (phase == protocol::RoomPhase::Failed) return;
     // 아무도 없으면 던전이 흐르지 않는다. 첫 플레이어가 들어오면
     // 다음 틱에 wave_index 가 -1 에서 0 이 되면서 시작된다.
     if (players_.empty()) return;
@@ -181,6 +183,12 @@ void World::update_phase(float dt) {
 }
 
 void World::update(float dt) {
+    died_this_tick.clear();
+
+    // 실패한 던전은 흐르지 않는다. 몬스터도 멈추고 타이머도 안 간다.
+    // 클라이언트가 결과 화면을 띄우는 동안 상태가 바뀌면 안 된다.
+    if (phase == protocol::RoomPhase::Failed) return;
+
     for (Player& p : players_) {
         p.apply_input(dt);
     }
@@ -212,6 +220,20 @@ void World::update(float dt) {
     }
 
     resolve_attacks(dt);
+    resolve_monster_attacks(dt);
+    update_downed(dt);
+
+    // 전멸 검사는 다운 처리 뒤에 한다 — 이번 틱에 마지막 한 명이
+    // 쓰러졌다면 그것까지 반영해서 판정해야 한다.
+    if (phase != protocol::RoomPhase::Failed && all_down()) {
+        phase = protocol::RoomPhase::Failed;
+        final_room = static_cast<std::uint32_t>(room_index);
+        final_wave = static_cast<std::uint32_t>(wave_index < 0 ? 0 : wave_index);
+        std::cout << "[world] WIPED at room " << final_room
+            << " wave " << final_wave
+            << " (kills " << total_kills << ")\n";
+    }
+
     update_phase(dt);
 }
 
@@ -220,6 +242,7 @@ const Player* World::nearest_player(float x, float y) const {
     float best_d2 = 0.0f;
 
     for (const Player& p : players_) {
+        if (!p.is_alive()) continue;
         float dx = p.x - x;
         float dy = p.y - y;
         float d2 = dx * dx + dy * dy;      // 제곱근은 비교에 필요 없다
@@ -253,8 +276,7 @@ void World::resolve_attacks(float dt) {
     died_this_tick.clear();
 
     for (Player& p : players_) {
-        // 쏠 준비가 됐으면 더 깎지 않는다. 목표가 없는 동안 음수로
-        // 쌓이면, 나중에 적이 나타났을 때 한꺼번에 터진다.
+        if (!p.is_alive()) continue;
         if (p.attack_timer > 0.0f) p.attack_timer -= dt;
         if (p.attack_timer > 0.0f) continue;
 
@@ -283,6 +305,92 @@ void World::resolve_attacks(float dt) {
     }
 }
 
+void World::resolve_monster_attacks(float dt) {
+    float r2 = protocol::kContactRange * protocol::kContactRange;
+
+    for (Monster& m : monsters_) {
+        if (m.attack_timer > 0.0f) m.attack_timer -= dt;
+        if (m.attack_timer > 0.0f) continue;
+
+        // 닿아 있는 산 플레이어를 찾는다.
+        Player* victim = nullptr;
+        for (Player& p : players_) {
+            if (!p.is_alive()) continue;
+            float dx = p.x - m.x;
+            float dy = p.y - m.y;
+            if (dx * dx + dy * dy <= r2) { victim = &p; break; }
+        }
+        if (!victim) continue;
+
+        victim->hp -= protocol::kMonsterDamage;
+        m.attack_timer += protocol::kMonsterAttackInterval;
+
+        if (victim->hp <= 0) {
+            victim->hp = 0;
+            victim->life = protocol::EntityLife::Down;
+            victim->down_timer = protocol::kDownToDeadSeconds; 
+            victim->revive_progress = 0.0f;                       
+            std::cout << "[world] player " << victim->id << " is DOWN\n";
+        }
+    }
+}
+
+void World::update_downed(float dt) {
+    float r2 = protocol::kReviveRange * protocol::kReviveRange;
+
+    for (Player& p : players_) {
+        if (p.life != protocol::EntityLife::Down) continue;
+
+        // 사망 타이머는 구조 중에도 멈추지 않는다.
+        // 멈추면 "일단 붙기만 하면 안전"이 되어 긴장이 사라진다.
+        p.down_timer -= dt;
+
+        // 근처에 살아 있는 동료가 있나.
+        bool helper = false;
+        for (const Player& q : players_) {
+            if (&q == &p) continue;
+            if (!q.is_alive()) continue;
+            float dx = q.x - p.x;
+            float dy = q.y - p.y;
+            if (dx * dx + dy * dy <= r2) { helper = true; break; }
+        }
+
+        if (helper) {
+            p.revive_progress += dt;
+            if (p.revive_progress >= protocol::kReviveSeconds) {
+                p.life = protocol::EntityLife::Alive;
+                p.hp = protocol::kReviveHp;
+                p.revive_progress = 0.0f;
+                p.down_timer = 0.0f;
+                std::cout << "[world] player " << p.id << " REVIVED\n";
+                continue;
+            }
+        }
+        else {
+            // 구하던 사람이 떠나면 진행도가 깎인다. 0 으로 날리지는 않는다 —
+            // 한 발짝 물러섰다가 돌아오는 플레이가 아예 불가능해진다.
+            p.revive_progress -= dt;
+            if (p.revive_progress < 0.0f) p.revive_progress = 0.0f;
+        }
+
+        if (p.down_timer <= 0.0f) {
+            p.life = protocol::EntityLife::Dead;
+            p.revive_progress = 0.0f;
+            std::cout << "[world] player " << p.id << " is DEAD\n";
+        }
+    }
+}
+
+bool World::all_down() const {
+    // 아무도 없는 것과 전멸은 다르다. 빈 월드는 실패가 아니다.
+    if (players_.empty()) return false;
+
+    for (const Player& p : players_) {
+        if (p.is_alive()) return false;
+    }
+    return true;
+}
+
 void World::collect_states(std::vector<protocol::EntityState>& out) const {
     out.clear();
 
@@ -292,6 +400,8 @@ void World::collect_states(std::vector<protocol::EntityState>& out) const {
         s.type = protocol::EntityType::Player;
         s.x = p.x;
         s.y = p.y;
+        s.hp_pct = p.hp_percent();                    
+        s.life = p.life;                            
         out.push_back(s);
     }
 
@@ -301,6 +411,9 @@ void World::collect_states(std::vector<protocol::EntityState>& out) const {
         s.type = protocol::EntityType::Monster;
         s.x = m.x;
         s.y = m.y;
+        s.hp_pct = static_cast<std::uint8_t>(
+            m.max_hp > 0 ? (m.hp * 100 / m.max_hp) : 0);   
+        s.life = protocol::EntityLife::Alive;              
         out.push_back(s);
     }
 
@@ -327,6 +440,14 @@ void World::next_room() {
     monsters_.clear();
 
     reset_player_positions();
+
+    // 방을 넘어가면 숨을 돌린다. 쓰러진 사람도 일어난다.
+    for (Player& p : players_) {
+        p.hp = protocol::kPlayerMaxHp;
+        p.life = protocol::EntityLife::Alive;
+        p.down_timer = 0.0f;          
+        p.revive_progress = 0.0f;
+    }
 
     std::cout << "[world] --> room " << room_index
         << " (monster hp " << monster_hp_for_room(room_index) << ")\n";

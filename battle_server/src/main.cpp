@@ -2,6 +2,8 @@
 #include <iostream>
 #include <optional>
 #include <utility>        // std::exchange (Boost 1.74 awaitable.hpp 우회)
+#include <string>
+
 #include <boost/asio.hpp>
 
 #include "BattleServer.h"
@@ -39,6 +41,11 @@ std::optional<unsigned short> resolve_port(int argc, char* argv[]) {
     return static_cast<unsigned short>(value);
 }
 
+static std::string env_or(const char* name, const char* fallback) {
+    const char* v = std::getenv(name);
+    return (v && *v) ? std::string(v) : std::string(fallback);
+}
+
 int main(int argc, char* argv[]) {
     std::cout << std::unitbuf;
 
@@ -47,7 +54,12 @@ int main(int argc, char* argv[]) {
 
     try {
         boost::asio::io_context io;
-        BattleServer server(io, *port);
+        std::string lobby_host = env_or("LOBBY_HOST", "lobby");
+        std::string lobby_port = env_or("LOBBY_PORT", "7777");
+        std::string secret = env_or("BATTLE_SECRET", "dev-secret");  
+        std::cout << "Lobby at " << lobby_host << ":" << lobby_port << '\n';
+
+        BattleServer server(io, *port, lobby_host, lobby_port, secret); 
         server.start();
 
         boost::asio::signal_set signals(io, SIGINT, SIGTERM);

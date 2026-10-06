@@ -52,15 +52,23 @@ namespace protocol {
 		Door = 2,
 	};
 
-	// 스냅샷에 담기는 엔티티 하나.
+	// 플레이어의 생존 상태. 몬스터는 항상 Alive 로 보낸다.
+	enum class EntityLife : std::uint8_t {
+		Alive = 0,
+		Down = 1,     // 쓰러짐. 파티원이 일으킬 수 있다
+		Dead = 2,     // 못 일어남 (그 판 한정)
+	};
+
 	struct EntityState {
 		std::uint32_t id = 0;
 		EntityType type = EntityType::Player;
 		float x = 0.0f;
 		float y = 0.0f;
+		std::uint8_t hp_pct = 100;                   // 0~100
+		EntityLife life = EntityLife::Alive;
 	};
 
-	inline constexpr std::size_t kEntityStateSize = 9;   // 4 + 1 + 2 + 2
+	inline constexpr std::size_t kEntityStateSize = 11;   // 4+1+2+2+1+1
 
 	enum class EventKind : std::uint8_t {
 		MonsterDied = 1,
@@ -80,6 +88,7 @@ namespace protocol {
 		Fighting = 0,       // 웨이브 진행 중
 		Cleared = 1,        // 전부 격파. 문이 열렸다
 		Transitioning = 2,  // 과반수 도달. 카운트다운 중
+		Failed = 3,         // 전멸. 던전 실패
 	};
 
 	// 방 진행 상황. 스냅샷처럼 계속 보내므로 재전송하지 않는다.
@@ -149,6 +158,21 @@ namespace protocol {
 	// 방이 깊어질수록 단단해진다. 수를 늘리는 것보다 이쪽이 낫다 —
 	// 수는 1400바이트 스냅샷에 묶여 있다.
 	inline constexpr int kMonsterHpPerRoom = 10;
+
+	// 플레이어 체력과 몬스터의 접촉 공격.
+	inline constexpr int   kPlayerMaxHp = 100;
+	inline constexpr float kContactRange = 1.5f;        // 이 안에 들어오면 때린다
+	inline constexpr int   kMonsterDamage = 3;
+	inline constexpr float kMonsterAttackInterval = 1.0f;
+
+	// 부활은 채널링이다. 쓰러진 동료 옆에 머물러야 한다 —
+	// 구하는 쪽도 그동안 위험을 감수한다.
+	inline constexpr float kReviveRange = 3.0f;
+	inline constexpr float kReviveSeconds = 3.0f;
+	inline constexpr int   kReviveHp = 50;          // 절반만 회복
+
+	// 이 안에 못 구하면 그 판에서는 못 일어난다.
+	inline constexpr float kDownToDeadSeconds = 10.0f;
 
 	// 새 방에 들어가면 왼쪽 입구에서 시작한다 (문은 오른쪽 x=40).
 	inline constexpr float kRoomEntryX = -30.0f;

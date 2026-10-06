@@ -2,8 +2,10 @@
 
 #include "Connection.h"   
 #include "World.h"
+#include "LobbyReport.h"
 #include "Protocol.h"     
 
+#include <string>
 #include <chrono>
 #include <array>
 #include <vector>
@@ -13,7 +15,9 @@
 
 class BattleServer {
 public:
-    BattleServer(boost::asio::io_context& io, unsigned short port);
+    BattleServer(boost::asio::io_context& io, unsigned short port,
+        std::string lobby_host, std::string lobby_port,
+        std::string secret);
 
     void start();
     void stop();
@@ -71,4 +75,14 @@ private:
     // 틱 간격이 목표에서 얼마나 벗어났는지 (1초마다 리셋)
     double worst_jitter_ms_ = 0.0;
     int ticks_this_second_ = 0;
+
+    void report_result(const char* result);
+
+    boost::asio::io_context& io_;        // LobbyReport 에 넘겨줘야 한다
+    std::string lobby_host_;
+    std::string lobby_port_;
+    std::string secret_;
+
+    // 이번 틱에 Failed 로 **바뀌었는지** 보려면 직전 값이 필요하다.
+    protocol::RoomPhase last_phase_ = protocol::RoomPhase::Fighting;
 };

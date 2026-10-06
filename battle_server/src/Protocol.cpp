@@ -77,6 +77,7 @@ namespace protocol {
 		write_u8(buf, static_cast<std::uint8_t>(count));
 
 		std::size_t off = 1;
+
 		for (std::size_t i = 0; i < count; ++i) {
 			std::int16_t xi = static_cast<std::int16_t>(entities[i].x * kPositionScale);
 			std::int16_t yi = static_cast<std::int16_t>(entities[i].y * kPositionScale);
@@ -85,8 +86,11 @@ namespace protocol {
 			write_u8(buf + off + 4, static_cast<std::uint8_t>(entities[i].type));
 			write_u16(buf + off + 5, static_cast<std::uint16_t>(xi));
 			write_u16(buf + off + 7, static_cast<std::uint16_t>(yi));
+			write_u8(buf + off + 9, entities[i].hp_pct);                        
+			write_u8(buf + off + 10, static_cast<std::uint8_t>(entities[i].life)); 
 			off += kEntityStateSize;
 		}
+
 		return off;
 	}
 
