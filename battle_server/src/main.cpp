@@ -65,6 +65,9 @@ int main(int argc, char* argv[]) {
             std::atoi(env_or("SIM_LOSS_IN", "0").c_str()),
             std::atoi(env_or("SIM_LOSS_OUT", "0").c_str()));
 
+        // 기본은 꺼져 있다. 부하 테스트에서만 켠다.
+        server.set_allow_anonymous(env_or("BATTLE_ALLOW_ANONYMOUS", "0") == "1");
+
         server.start();
 
         boost::asio::signal_set signals(io, SIGINT, SIGTERM);

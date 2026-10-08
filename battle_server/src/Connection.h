@@ -50,6 +50,10 @@ struct Connection {
 	// 0 이면 아직 캐릭터가 없다는 뜻 (World 는 1부터 발급한다).
 	std::uint32_t entity_id = 0;
 
+	// 로비가 알려준 신원. 결과를 보낼 때 쓴다.
+	std::string username;
+	std::uint32_t lobby_player_id = 0;
+
 	std::uint16_t take_sequence() { return next_sequence++; }
 
 	// 패킷을 받았을 때 호출. ack/ack_bits 의 재료를 갱신한다.

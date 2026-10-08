@@ -10,6 +10,7 @@
 #include <chrono>
 #include <optional>
 #include <utility>
+#include <random>
 #include <boost/asio.hpp>
 #include <nlohmann/json.hpp>
 
@@ -344,6 +345,32 @@ private:
 
 class Server;   // 전방 선언 — Session이 Server&를 갖기 위해 필요
 
+static std::string battle_secret() {
+    const char* v = std::getenv("BATTLE_SECRET");
+    return (v && *v) ? std::string(v) : std::string("dev-secret");
+}
+
+// 클라이언트가 접속할 배틀 서버 주소. 배틀 서버는 자기 공인 주소를
+// 모르므로(컨테이너 안에서는 172.17.x.x) 로비가 환경변수로 알고 있는다.
+static std::string battle_public_host() {
+    const char* v = std::getenv("BATTLE_PUBLIC_HOST");
+    return (v && *v) ? std::string(v) : std::string("127.0.0.1");
+}
+
+// 입장권. 추측할 수 없어야 하므로 난수를 쓴다.
+// 16자 16진수 = 64비트. 무작위로 맞힐 확률은 사실상 0이다.
+static std::string make_battle_token() {
+    static std::mt19937_64 rng{ std::random_device{}() };
+    static const char* hex = "0123456789abcdef";
+
+    std::uint64_t v = rng();
+    std::string s(16, '0');
+    for (int i = 0; i < 16; ++i) {
+        s[15 - i] = hex[(v >> (i * 4)) & 0xF];
+    }
+    return s;
+}
+
 // ============================================================
 // Session — 연결 하나를 담당
 // ============================================================
@@ -463,6 +490,11 @@ private:
                 return;
             }
 
+            if (type == "BattleRegister") {
+                handle_battle_register(data);
+                return;
+            }
+
             // 그 외 모든 메시지는 로그인 필수
             if (!logged_in_) {
                 send_error("login required");
@@ -488,7 +520,8 @@ private:
             if (type == "FriendRespond") { handle_friend_respond(data); return; }
             if (type == "FriendList") { handle_friend_list(); return; }
             if (type == "FriendRemove") { handle_friend_remove(data); return; }
-
+            if (type == "BattleStart") { handle_battle_start(); return; }
+            
             send_error("unknown message type: " + type);
         }
         catch (const std::exception& e) {
@@ -497,22 +530,32 @@ private:
     }
 
     void handle_dungeon_result(const nlohmann::json& data) {
-        // 로그인 없이 받는 유일한 경로라, 공유 시크릿으로 막는다.
+        // 로그인 없이 받는 경로라, 공유 시크릿으로 막는다.
         // 이게 없으면 누구나 7777 에 붙어 가짜 결과를 밀어 넣을 수 있다.
-        const char* env = std::getenv("BATTLE_SECRET");
-        std::string expected = (env && *env) ? env : "dev-secret";
-
-        if (data.value("secret", "") != expected) {
+        if (data.value("secret", "") != battle_secret()) {
             std::cerr << "DungeonResult rejected: bad secret\n";
             return;      // 응답도 안 한다. 맞췄는지 알려줄 이유가 없다
         }
 
-        std::cout << "[dungeon] result=" << data.value("result", "?")
+        std::string names;
+        for (const auto& n : data.value("players", nlohmann::json::array())) {
+            if (!n.is_string()) continue;
+            if (!names.empty()) names += ", ";
+            names += n.get<std::string>();
+        }
+
+        std::cout << "[dungeon] battle=" << data.value("battleId", 0)
+            << " result=" << data.value("result", "?")
             << " room=" << data.value("room", 0)
             << " wave=" << data.value("wave", 0)
             << " kills=" << data.value("kills", 0)
-            << " players=" << data.value("players", 0) << '\n';
+            << " players=[" << names << "]\n";
     }
+
+    // Server 를 쓰므로 선언만 둔다. 정의는 파일 아래쪽 —
+    // Session 이 Server 보다 먼저 정의되어 있어서 여기서는 쓸 수 없다.
+    void handle_battle_register(const nlohmann::json& data);
+    void handle_battle_start();
 
     void send_error(const std::string& message) {
         nlohmann::json err;
@@ -548,6 +591,10 @@ private:
     uint64_t player_id_ = 0;
     std::string username_;
     bool logged_in_ = false;
+
+    // 사람이 아니라 배틀 서버가 붙은 연결.
+    bool is_battle_server_ = false;
+    int battle_port_ = 0;
 
     // 방 소속(room_id_)은 Server가 들고 있다. 매칭처럼 "남을 방에 넣는" 동작이 생기면
     // 각 Session이 자기 소속을 따로 들고 있는 구조로는 갱신할 방법이 없다.
@@ -658,6 +705,25 @@ public:
 
         it->second->close();
     }
+
+    // 방 전체가 아니라 한 사람에게만 보낸다. 입장권은 각자 다르다.
+    void send_to_player(uint64_t player_id, const nlohmann::json& message) {
+        auto it = sessions_.find(player_id);
+        if (it == sessions_.end()) return;      // 그 사이 끊겼으면 그냥 버린다
+        it->second->send(message);
+    }
+
+    // ---- 배틀 서버 링크 ----
+    // weak_ptr 인 이유: 배틀 서버가 끊기면 Session 이 사라져야 하는데,
+    // Server 가 shared_ptr 로 잡고 있으면 영영 안 죽는다. (Step 12)
+    void set_battle_link(std::shared_ptr<Session> s, unsigned short port) {
+        battle_link_ = s;
+        battle_udp_port_ = port;
+    }
+
+    std::shared_ptr<Session> battle_link() { return battle_link_.lock(); }
+    unsigned short battle_udp_port() const { return battle_udp_port_; }
+    uint32_t take_battle_id() { return next_battle_id_++; }
 
     // ---- 세션 레지스트리 ----
     // 방은 멤버를 player_id로만 들고 있어서, 그 번호만으로는 메시지를 보낼 수 없다.
@@ -952,6 +1018,11 @@ public:
     }
 
 private:
+    // 붙어 있는 배틀 서버 세션. 지금은 한 대만 상정한다.
+    std::weak_ptr<Session> battle_link_;
+    unsigned short battle_udp_port_ = 0;
+    uint32_t next_battle_id_ = 1;
+
     void do_accept() {
         acceptor_.async_accept(
             [this](boost::system::error_code ec, tcp::socket socket) {
@@ -1401,6 +1472,78 @@ void Session::handle_match_cancel() {
     std::cout << username_ << " cancelled matchmaking\n";
 
     send({ {"type", "MatchCancelOk"}, {"data", nlohmann::json::object()} });
+}
+
+void Session::handle_battle_register(const nlohmann::json& data) {
+    if (data.value("secret", "") != battle_secret()) {
+        std::cerr << "BattleRegister rejected: bad secret\n";
+        return;
+    }
+
+    is_battle_server_ = true;
+    battle_port_ = data.value("port", 0);
+
+    server_.set_battle_link(shared_from_this(),
+        static_cast<unsigned short>(battle_port_));
+
+    std::cout << "[battle] server registered (udp port "
+        << battle_port_ << ")\n";
+}
+
+void Session::handle_battle_start() {
+    uint32_t room_id = server_.room_of(player_id_);
+    if (room_id == 0) { send_error("not in a room"); return; }
+
+    Room* room = server_.find_room(room_id);
+    if (!room) { send_error("room is gone"); return; }
+
+    auto link = server_.battle_link();
+    if (!link) { send_error("battle server offline"); return; }
+
+    uint32_t battle_id = server_.take_battle_id();
+
+    // 방 전원에게 표를 하나씩 발급한다. 각자 다른 표다.
+    nlohmann::json players = nlohmann::json::array();
+    std::vector<std::pair<uint64_t, std::string>> grants;
+
+    for (uint64_t pid : room->members) {
+        PlayerRegistry::Player* p = server_.players().find(pid);
+        if (!p) continue;
+
+        std::string token = make_battle_token();
+        players.push_back({
+            {"token", token},
+            {"username", p->username},
+            {"player_id", pid}
+            });
+        grants.emplace_back(pid, token);
+    }
+
+    // 1) 배틀 서버에 "이 사람들이 간다"
+    nlohmann::json grant;
+    grant["type"] = "SessionGrant";
+    grant["data"] = {
+        {"secret", battle_secret()},
+        {"battle_id", battle_id},
+        {"players", players}
+    };
+    link->send(grant);
+
+    // 2) 각자에게 "여기로 붙어라". 표가 다르므로 개별 전송이다.
+    for (const auto& g : grants) {
+        nlohmann::json ready;
+        ready["type"] = "BattleReady";
+        ready["data"] = {
+            {"battleId", battle_id},
+            {"host", battle_public_host()},
+            {"port", server_.battle_udp_port()},
+            {"token", g.second}
+        };
+        server_.send_to_player(g.first, ready);
+    }
+
+    std::cout << "[battle] start battle=" << battle_id
+        << " players=" << grants.size() << '\n';
 }
 
 void Session::on_disconnect() {

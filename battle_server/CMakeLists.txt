@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Threads REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 # 로비 서버와 달리 JSON을 안 쓴다. 30Hz로 보내는 패킷에
 # {"type":"..."} 를 실을 수는 없다. 바이너리로 직접 찍는다.
@@ -25,7 +26,7 @@ add_executable(battle_server
     src/BattleServer.cpp
     src/Protocol.cpp 
     src/World.cpp
-    src/LobbyReport.cpp
+    src/LobbyLink.cpp
 )
 
 target_include_directories(battle_server PRIVATE src)
@@ -51,6 +52,7 @@ target_include_directories(battle_bot PRIVATE src)
 target_link_libraries(battle_bot PRIVATE
     ${BOOST_ASIO_TARGET}
     Threads::Threads
+    nlohmann_json::nlohmann_json 
 )
 
 if(MSVC)

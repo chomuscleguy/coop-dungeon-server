@@ -1,5 +1,7 @@
 #include "BattleServer.h"
 #include "Protocol.h"  
+
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <sstream>
 #include <utility>
@@ -11,9 +13,7 @@ BattleServer::BattleServer(boost::asio::io_context& io, unsigned short port,
 	std::string lobby_host, std::string lobby_port, std::string secret)
 	: socket_(io, udp::endpoint(udp::v4(), port)),
 	tick_timer_(io),
-	io_(io),
-	lobby_host_(std::move(lobby_host)),
-	lobby_port_(std::move(lobby_port)),
+	lobby_(io, std::move(lobby_host), std::move(lobby_port)),
 	secret_(std::move(secret)) {
 }
 
@@ -36,15 +36,33 @@ void BattleServer::start() {
 		<< socket_.local_endpoint().port()
 		<< " (tick " << protocol::kTickHz << "Hz)" << '\n';
 
-	next_tick_ = std::chrono::steady_clock::now();      
-	last_tick_at_ = next_tick_;                          
+	next_tick_ = std::chrono::steady_clock::now();
+	last_tick_at_ = next_tick_;
 
+	lobby_.on_message = [this](const std::string& json) {
+		handle_lobby_message(json);
+		};
+
+	// 연결되자마자 자기소개를 한다. 로비는 이걸 받아야 이 연결이
+	// 사람이 아니라 배틀 서버라는 걸 안다.
+	lobby_.on_connected = [this]() {
+		std::ostringstream os;
+		os << "{\"type\":\"BattleRegister\",\"data\":{"
+			<< "\"secret\":\"" << secret_ << "\","
+			<< "\"port\":" << socket_.local_endpoint().port()
+			<< "}}";
+		std::cout << "[lobby] -> " << os.str() << '\n';
+		lobby_.send(os.str());
+		};
+
+	lobby_.start();
 	do_receive();
 	start_tick_timer();
 }
 
 void BattleServer::stop() {
 	std::cout << "Shutting down..." << '\n';
+	lobby_.stop();
 	boost::system::error_code ec;
 	socket_.close(ec);
 	tick_timer_.cancel();
@@ -63,8 +81,8 @@ void BattleServer::do_receive() {
 				return;
 			}
 
-			stats_.recv_bytes += size;      
-			stats_.recv_packets += 1;        
+			stats_.recv_bytes += size;
+			stats_.recv_packets += 1;
 
 			handle_packet(sender_, buffer_.data(), size);
 			do_receive();
@@ -81,7 +99,7 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 
 	// 핸드셰이크는 아직 세션이 없는 상태에서 온다. 유일한 예외.
 	if (h.type == protocol::PacketType::Handshake) {
-		handle_handshake(from, h.sequence);
+		handle_handshake(from, h.sequence, data, size);
 		return;
 	}
 
@@ -134,8 +152,8 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 		protocol::InputPayload in;
 		if (protocol::read_input(data + protocol::kHeaderSize,
 			size - protocol::kHeaderSize, in)) {
-			Player* p = world_.find_player(c->entity_id);     
-			if (p) p->set_input(in.move_x, in.move_y);      
+			Player* p = world_.find_player(c->entity_id);
+			if (p) p->set_input(in.move_x, in.move_y);
 		}
 		return;      // 초당 30번 오므로 로그를 남기지 않는다
 	}
@@ -152,12 +170,44 @@ Connection* BattleServer::find_connection(const udp::endpoint& from) {
 	return (it == connections_.end()) ? nullptr : &it->second;
 }
 
-void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq) {
+void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq,
+	const std::uint8_t* data, std::size_t size) {
+
 	Connection* existing = find_connection(from);
 	if (existing) {
+		// 이미 들어온 사람. 토큰을 다시 보지 않는다 — 재전송된
+		// 핸드셰이크일 뿐이고, 토큰은 이미 소비됐다. (Step 13 멱등성)
 		existing->last_seen = std::chrono::steady_clock::now();
 		existing->on_packet_received(seq);
 		send_to(*existing, protocol::PacketType::HandshakeAck, true);
+		return;
+	}
+
+	std::string username;
+	std::uint32_t lobby_id = 0;
+	std::uint32_t grant_battle = 0;
+
+	std::size_t payload = size - protocol::kHeaderSize;
+	if (payload >= protocol::kTokenSize) {
+		std::string token(reinterpret_cast<const char*>(data + protocol::kHeaderSize),
+			protocol::kTokenSize);
+
+		auto it = pending_.find(token);
+		if (it != pending_.end()) {
+			username = it->second.username;
+			lobby_id = it->second.lobby_player_id;
+			grant_battle = it->second.battle_id;
+			// 한 번 쓰면 사라진다. 같은 표로 둘이 들어올 수 없다.
+			pending_.erase(it);
+		}
+		else if (!allow_anonymous_) {
+			// 모르는 표. 응답하지 않는다 — 틀렸다고 알려줄 이유가 없다.
+			std::cout << "Handshake rejected (unknown token) from " << from << '\n';
+			return;
+		}
+	}
+	else if (!allow_anonymous_) {
+		std::cout << "Handshake rejected (no token) from " << from << '\n';
 		return;
 	}
 
@@ -166,27 +216,40 @@ void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq
 	c.endpoint = from;
 	c.last_seen = std::chrono::steady_clock::now();
 	c.on_packet_received(seq);
-	c.entity_id = world_.add_player();      
+	c.entity_id = world_.add_player();
+	c.username = username;
+	c.lobby_player_id = lobby_id;
 
 	connections_.emplace(from, c);
+
+	// 명단에 올린다. 중간에 끊겨도 여기서는 안 지운다 —
+	// 결과는 "지금 접속해 있는 사람"이 아니라 "이 판을 돈 사람"이다.
+	if (!username.empty()) {
+		battle_id_ = grant_battle;
+		bool known = false;
+		for (const auto& u : roster_) { if (u == username) { known = true; break; } }
+		if (!known) roster_.push_back(username);
+	}
+
 	std::cout << "Handshake from " << from
 		<< " -> conn " << c.id
-		<< " (entity " << c.entity_id << ")" << '\n';
+		<< " (entity " << c.entity_id
+		<< ", user " << (username.empty() ? "<anon>" : username) << ")" << '\n';
 
 	send_to(connections_[from], protocol::PacketType::HandshakeAck, true);
 }
 
 void BattleServer::send_to(Connection& c, protocol::PacketType type, bool reliable,
-	std::uint8_t attempts, std::size_t payload_size) {    
+	std::uint8_t attempts, std::size_t payload_size) {
 	protocol::PacketHeader h;
 	h.sequence = c.take_sequence();
 	h.ack = c.remote_sequence;
 	h.ack_bits = c.received_bits;
 	h.type = type;
-	
+
 	protocol::write_header(send_buffer_.data(), h);
 
-	c.on_packet_sent(h.sequence, type, reliable, attempts, 
+	c.on_packet_sent(h.sequence, type, reliable, attempts,
 		send_buffer_.data() + protocol::kHeaderSize, payload_size);
 
 	std::size_t total = protocol::kHeaderSize + payload_size;
@@ -207,7 +270,7 @@ void BattleServer::send_to(Connection& c, protocol::PacketType type, bool reliab
 		stats_.sent_count_by_type[ti] += 1;
 	}
 
-	boost::system::error_code ec; 
+	boost::system::error_code ec;
 	socket_.send_to(
 		boost::asio::buffer(send_buffer_.data(), total),
 		c.endpoint, 0, ec);
@@ -228,7 +291,7 @@ void BattleServer::start_tick_timer() {
 		next_tick_ = now + protocol::kTickInterval;
 	}
 
-	tick_timer_.expires_at(next_tick_); 
+	tick_timer_.expires_at(next_tick_);
 	tick_timer_.async_wait([this](boost::system::error_code ec) {
 		if (ec) return;
 		on_tick();
@@ -346,20 +409,64 @@ void BattleServer::broadcast_room_state() {
 }
 
 void BattleServer::report_result(const char* result) {
-	// 손으로 만든다. 전부 정수와 고정 문자열이라 이스케이프할 것이 없다.
-	// 사용자 이름 같은 문자열이 들어오면 이 방식은 못 쓴다.
-	std::ostringstream os;
-	os << "{\"type\":\"DungeonResult\",\"data\":{"
-		<< "\"secret\":\"" << secret_ << "\","
-		<< "\"result\":\"" << result << "\","
-		<< "\"room\":" << world_.final_room << ","
-		<< "\"wave\":" << world_.final_wave << ","
-		<< "\"kills\":" << world_.total_kills << ","
-		<< "\"players\":" << world_.player_count()
-		<< "}}";
+	// 18d 에서는 손으로 만들었다. 전부 정수와 고정 문자열이었으니까.
+	// 이제 사용자 이름이 들어온다 — 따옴표나 역슬래시가 섞이면 손으로 만든
+	// JSON 은 깨진다. 조건이 바뀌었으니 방식도 바꾼다.
+	nlohmann::json msg;
+	msg["type"] = "DungeonResult";
+	msg["data"] = {
+		{"secret", secret_},
+		{"battleId", battle_id_},
+		{"result", result},
+		{"room", world_.final_room},
+		{"wave", world_.final_wave},
+		{"kills", world_.total_kills},
+		{"players", roster_}
+	};
 
-	std::cout << "[lobby] -> " << os.str() << '\n';
-	LobbyReport::send(io_, lobby_host_, lobby_port_, os.str());
+	std::string body = msg.dump();
+	std::cout << "[lobby] -> " << body << '\n';
+	lobby_.send(body);
+}
+
+void BattleServer::handle_lobby_message(const std::string& json) {
+	try {
+		nlohmann::json msg = nlohmann::json::parse(json);
+		std::string type = msg.value("type", "");
+		nlohmann::json data = msg.value("data", nlohmann::json::object());
+
+		if (type != "SessionGrant") {
+			std::cout << "[lobby] <- unknown: " << type << '\n';
+			return;
+		}
+
+		if (data.value("secret", "") != secret_) {
+			std::cerr << "[lobby] SessionGrant rejected: bad secret\n";
+			return;
+		}
+
+		std::uint32_t battle_id = data.value("battle_id", 0u);
+		int added = 0;
+
+		for (const auto& p : data.value("players", nlohmann::json::array())) {
+			std::string token = p.value("token", "");
+			if (token.size() != protocol::kTokenSize) continue;
+
+			PendingPlayer pp;
+			pp.username = p.value("username", "");
+			pp.lobby_player_id = p.value("player_id", 0u);
+			pp.battle_id = battle_id;
+			pending_[token] = pp;
+			++added;
+		}
+
+		std::cout << "[lobby] SessionGrant battle=" << battle_id
+			<< " players=" << added << '\n';
+	}
+	catch (const std::exception& e) {
+		// 로비는 우리 편이지만 파싱은 방어적이어야 한다.
+		std::cerr << "[lobby] parse error: " << e.what() << '\n';
+	}
 }
 
 void BattleServer::broadcast_snapshot() {
@@ -440,7 +547,7 @@ void BattleServer::on_second() {
 	std::vector<udp::endpoint> dead;
 	for (auto& entry : connections_) {
 		Connection& c = entry.second;
-		
+
 		std::cout << "[conn " << c.id << "] sent=" << c.total_sent
 			<< " acked=" << c.total_acked
 			<< " lost=" << c.total_lost

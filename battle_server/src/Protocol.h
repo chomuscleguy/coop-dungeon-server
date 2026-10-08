@@ -53,6 +53,9 @@ namespace protocol {
 
 	inline constexpr std::size_t kInputPayloadSize = 2;
 
+	// Handshake 에 붙는 입장권. 로비가 발급한 16자 ASCII 16진수.
+	inline constexpr std::size_t kTokenSize = 16;
+
 	// Heartbeat 에 붙는 토큰. 서버는 해석하지 않고 그대로 되돌려준다.
 	// 클라이언트가 보낸 값을 받아 지금 시각과 빼면 진짜 왕복 시간이다.
 	inline constexpr std::size_t kHeartbeatPayloadSize = 4;
