@@ -40,10 +40,14 @@ std::uint32_t World::spawn_monster(float x, float y) {
     return m.id;
 }
 
-int World::monsters_for_wave(int room, int wave) const {
-    // 방마다 +4, 웨이브마다 +4. 방 10에서 60마리로 154 한계 아래.
-    // 곱하기가 아니라 더하기인 이유: 곱하면 5번째 방에서 수백 마리가 된다.
-    return protocol::kBaseMonstersPerWave + room * 4 + wave * 4;
+int World::monsters_for_wave(int room, int wave, int players) const {
+    if (players < 1) players = 1;
+
+    // 인원이 늘면 받는 피해는 1/N 로 줄고 주는 피해는 N 배가 된다.
+    // 마릿수를 그대로 두면 난이도가 인원의 제곱으로 쉬워진다.
+    // 1인 기준 12/16/20 을 유지하면서 인원에 비례해 늘린다.
+    int base = protocol::kBaseMonstersPerWave + room * 4 + wave * 4;
+    return base * players;
 }
 
 int World::monster_hp_for_room(int room) const {
@@ -61,7 +65,8 @@ void World::spawn_wave() {
         cy /= players_.size();
     }
 
-    int count = monsters_for_wave(room_index, wave_index);
+    int count = monsters_for_wave(room_index, wave_index,
+        static_cast<int>(players_.size()));
 
     for (int i = 0; i < count; ++i) {
         float angle = 6.2831853f * i / count;

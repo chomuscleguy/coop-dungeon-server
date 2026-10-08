@@ -17,6 +17,20 @@ BattleServer::BattleServer(boost::asio::io_context& io, unsigned short port,
 	secret_(std::move(secret)) {
 }
 
+void BattleServer::set_sim_loss(int in_percent, int out_percent) {
+	sim_loss_in_ = in_percent;
+	sim_loss_out_ = out_percent;
+	if (in_percent > 0 || out_percent > 0) {
+		std::cout << "SIM LOSS in=" << in_percent << "% out="
+			<< out_percent << "%\n";
+	}
+}
+
+bool BattleServer::drop_roll(int percent) {
+	if (percent <= 0) return false;
+	return (sim_rng_() % 100) < static_cast<unsigned>(percent);
+}
+
 void BattleServer::start() {
 	std::cout << "Battle server listening on UDP "
 		<< socket_.local_endpoint().port()
@@ -40,9 +54,17 @@ void BattleServer::do_receive() {
 	socket_.async_receive_from(
 		boost::asio::buffer(buffer_), sender_,
 		[this](boost::system::error_code ec, std::size_t size) {
-			// 소켓이 닫히면(stop) 에러와 함께 불린다. 여기서 끝내야
-			// io.run() 이 반환한다. (로비 Step 12에서 배운 것)
 			if (ec) return;
+
+			// 업링크 유실 흉내. 받았지만 못 받은 척한다.
+			if (drop_roll(sim_loss_in_)) {
+				stats_.sim_dropped_in += 1;
+				do_receive();
+				return;
+			}
+
+			stats_.recv_bytes += size;      
+			stats_.recv_packets += 1;        
 
 			handle_packet(sender_, buffer_.data(), size);
 			do_receive();
@@ -53,6 +75,7 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 	const std::uint8_t* data, std::size_t size) {
 	protocol::PacketHeader h;
 	if (!protocol::read_header(data, size, h)) {
+		stats_.recv_dropped += 1;
 		return;
 	}
 
@@ -65,8 +88,7 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 	// 그 외는 등록된 주소에서 온 것만 받는다.
 	Connection* c = find_connection(from);
 	if (!c) {
-		// 모르는 주소. 핸드셰이크부터 하라고 알려줄 수도 있지만,
-		// 아무나 보낼 수 있는 UDP에서 그건 증폭 공격의 발판이 된다.
+		stats_.recv_dropped += 1;
 		return;
 	}
 
@@ -88,11 +110,19 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 		send_to(*c, p.type, true);
 	}
 
-
 	// 하트비트는 받은 사실만으로 last_seen 이 갱신되므로 되돌려주기만 하면 된다.
 	// 클라이언트도 서버가 살아있는지 알아야 한다.
 	if (h.type == protocol::PacketType::Heartbeat) {
-		send_to(*c, protocol::PacketType::Heartbeat, false);
+		// 본문이 있으면 해석하지 않고 그대로 돌려준다.
+		// 서버는 이 값이 뭔지 모르고 알 필요도 없다.
+		std::size_t payload = size - protocol::kHeaderSize;
+		if (payload > protocol::kHeartbeatPayloadSize) {
+			payload = protocol::kHeartbeatPayloadSize;
+		}
+		for (std::size_t i = 0; i < payload; ++i) {
+			send_buffer_[protocol::kHeaderSize + i] = data[protocol::kHeaderSize + i];
+		}
+		send_to(*c, protocol::PacketType::Heartbeat, false, 1, payload);
 		return;
 	}
 
@@ -159,10 +189,27 @@ void BattleServer::send_to(Connection& c, protocol::PacketType type, bool reliab
 	c.on_packet_sent(h.sequence, type, reliable, attempts, 
 		send_buffer_.data() + protocol::kHeaderSize, payload_size);
 
-	boost::system::error_code ec;
+	std::size_t total = protocol::kHeaderSize + payload_size;
+
+	// 다운링크 유실 흉내. on_packet_sent 는 이미 불렀으므로
+	// 신뢰성 계층은 "보냈다"고 믿고, ack 가 안 오면 유실로 판정한다.
+	// 바로 그게 시험하려는 동작이다.
+	if (drop_roll(sim_loss_out_)) {
+		stats_.sim_dropped_out += 1;
+		return;
+	}
+
+	stats_.sent_bytes += total;
+	stats_.sent_packets += 1;
+	std::size_t ti = static_cast<std::size_t>(type);
+	if (ti < protocol::kPacketTypeCount) {
+		stats_.sent_by_type[ti] += total;
+		stats_.sent_count_by_type[ti] += 1;
+	}
+
+	boost::system::error_code ec; 
 	socket_.send_to(
-		boost::asio::buffer(send_buffer_.data(),
-			protocol::kHeaderSize + payload_size),      
+		boost::asio::buffer(send_buffer_.data(), total),
 		c.endpoint, 0, ec);
 
 	if (ec) {
@@ -326,6 +373,9 @@ void BattleServer::broadcast_snapshot() {
 		send_buffer_.size() - protocol::kHeaderSize,
 		snapshot_buffer_.data(), snapshot_buffer_.size());
 
+	if (payload_size > stats_.peak_snapshot) stats_.peak_snapshot = payload_size;
+	if (payload_size > peak_snapshot_ever_) peak_snapshot_ever_ = payload_size;
+
 	for (auto& entry : connections_) {
 		send_to(entry.second, protocol::PacketType::Snapshot,
 			false, 1, payload_size);
@@ -339,6 +389,35 @@ void BattleServer::on_second() {
 	std::cout << "[tick] " << ticks_this_second_ << "/s"
 		<< " worst_jitter=" << worst_jitter_ms_ << "ms"
 		<< " total=" << tick_count_ << '\n';
+
+	{
+		std::uint64_t wire_sent =
+			stats_.sent_bytes + stats_.sent_packets * protocol::kWireOverhead;
+		std::uint64_t wire_recv =
+			stats_.recv_bytes + stats_.recv_packets * protocol::kWireOverhead;
+
+		std::cout << "[net] sent " << stats_.sent_bytes << "B"
+			<< " (" << stats_.sent_packets << " pkt, wire " << wire_sent << "B)"
+			<< " | recv " << stats_.recv_bytes << "B"
+			<< " (" << stats_.recv_packets << " pkt, wire " << wire_recv << "B"
+			<< ", dropped " << stats_.recv_dropped << ")"
+			<< " | sim in=" << stats_.sim_dropped_in
+			<< " out=" << stats_.sim_dropped_out
+			<< " | snap peak " << stats_.peak_snapshot
+			<< "/" << peak_snapshot_ever_ << "B"
+			<< " | conns " << connections_.size() << '\n';
+
+		std::cout << "[net]  ";
+		for (std::size_t i = 0; i < protocol::kPacketTypeCount; ++i) {
+			if (stats_.sent_count_by_type[i] == 0) continue;
+			std::cout << " " << protocol::to_string(static_cast<protocol::PacketType>(i))
+				<< "=" << stats_.sent_by_type[i] << "B/"
+				<< stats_.sent_count_by_type[i];
+		}
+		std::cout << '\n';
+
+		stats_.reset();
+	}
 
 	const char* phase_name = "?";
 	switch (world_.phase) {
@@ -366,7 +445,7 @@ void BattleServer::on_second() {
 			<< " acked=" << c.total_acked
 			<< " lost=" << c.total_lost
 			<< " inflight=" << c.sent_packets.size()
-			<< " rtt=" << c.rtt_ms << "ms"
+			<< " ackrtt=" << c.rtt_ms << "ms"
 			<< " rto=" << c.rto_ms() << "ms"
 			<< " gaveup=" << c.total_given_up << '\n';
 

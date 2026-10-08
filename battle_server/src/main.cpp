@@ -60,6 +60,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Lobby at " << lobby_host << ":" << lobby_port << '\n';
 
         BattleServer server(io, *port, lobby_host, lobby_port, secret); 
+
+        server.set_sim_loss(
+            std::atoi(env_or("SIM_LOSS_IN", "0").c_str()),
+            std::atoi(env_or("SIM_LOSS_OUT", "0").c_str()));
+
         server.start();
 
         boost::asio::signal_set signals(io, SIGINT, SIGTERM);

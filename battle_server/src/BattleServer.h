@@ -11,13 +11,43 @@
 #include <vector>
 #include <cstdint>
 #include <utility>
+#include <random>
 #include <boost/asio.hpp>
+
+// 1초치 트래픽. on_second 에서 찍고 비운다.
+struct TrafficStats {
+    std::uint64_t sent_bytes = 0;
+    std::uint64_t sent_packets = 0;
+    std::uint64_t recv_bytes = 0;
+    std::uint64_t recv_packets = 0;
+    std::uint64_t recv_dropped = 0;     // 파싱 실패 또는 모르는 주소
+    std::uint64_t sim_dropped_in = 0;   // 받았지만 안 받은 척
+    std::uint64_t sim_dropped_out = 0;  // 보냈다 치고 안 보냄
+
+    std::array<std::uint64_t, protocol::kPacketTypeCount> sent_by_type{};
+    std::array<std::uint64_t, protocol::kPacketTypeCount> sent_count_by_type{};
+
+    std::size_t peak_snapshot = 0;      // 이 1초의 최대 스냅샷 본문 크기
+
+    void reset() {
+        sent_bytes = sent_packets = 0;
+        recv_bytes = recv_packets = recv_dropped = 0;
+        sent_by_type.fill(0);
+        sent_count_by_type.fill(0);
+        peak_snapshot = 0;
+        sim_dropped_in = sim_dropped_out = 0;
+    }
+};
 
 class BattleServer {
 public:
     BattleServer(boost::asio::io_context& io, unsigned short port,
         std::string lobby_host, std::string lobby_port,
         std::string secret);
+
+    // 생성자가 아니라 세터로 받는다. 생성자 인자가 다섯을 넘으면
+    // 호출부에서 순서를 틀리기 시작한다.
+    void set_sim_loss(int in_percent, int out_percent);
 
     void start();
     void stop();
@@ -85,4 +115,13 @@ private:
 
     // 이번 틱에 Failed 로 **바뀌었는지** 보려면 직전 값이 필요하다.
     protocol::RoomPhase last_phase_ = protocol::RoomPhase::Fighting;
+
+    TrafficStats stats_;
+    std::size_t peak_snapshot_ever_ = 0;
+
+    bool drop_roll(int percent);
+
+    int sim_loss_in_ = 0;
+    int sim_loss_out_ = 0;
+    std::mt19937 sim_rng_{ 7777 };     // 고정 시드 — 같은 조건이면 같은 유실
 };

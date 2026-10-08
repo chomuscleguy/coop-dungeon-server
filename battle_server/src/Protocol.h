@@ -36,6 +36,13 @@ namespace protocol {
 
 	inline constexpr std::size_t kHeaderSize = 11;   // 2+2+2+4+1
 
+	// IPv4(20) + UDP(8). 우리 바이트에 패킷마다 이만큼 더 붙는다.
+	// 작은 패킷을 자주 보내면 이 비중이 본문보다 커진다.
+	inline constexpr std::size_t kWireOverhead = 28;
+
+	// PacketType 의 개수. 타입별 통계 배열 크기로 쓴다.
+	inline constexpr std::size_t kPacketTypeCount = 8;
+
 	// Input 패킷의 본문. 헤더 바로 뒤에 붙는다.
 	// 방향을 float(8바이트) 대신 int8(2바이트)로 보낸다. 이동 방향에
 	// 소수점 정밀도는 필요 없고, 같은 수법을 Step 16의 위치 압축에 쓴다.
@@ -45,6 +52,10 @@ namespace protocol {
 	};
 
 	inline constexpr std::size_t kInputPayloadSize = 2;
+
+	// Heartbeat 에 붙는 토큰. 서버는 해석하지 않고 그대로 되돌려준다.
+	// 클라이언트가 보낸 값을 받아 지금 시각과 빼면 진짜 왕복 시간이다.
+	inline constexpr std::size_t kHeartbeatPayloadSize = 4;
 
 	enum class EntityType : std::uint8_t {
 		Player = 0,

@@ -40,3 +40,20 @@ if(MSVC)
     target_compile_options(battle_server PRIVATE "/utf-8")
 endif()
 
+
+add_executable(battle_bot
+    src/bot_main.cpp
+    src/Protocol.cpp
+)
+
+target_include_directories(battle_bot PRIVATE src)
+
+target_link_libraries(battle_bot PRIVATE
+    ${BOOST_ASIO_TARGET}
+    Threads::Threads
+)
+
+if(MSVC)
+    target_compile_definitions(battle_bot PRIVATE _WIN32_WINNT=0x0A00)
+    target_compile_options(battle_bot PRIVATE "/utf-8")
+endif()

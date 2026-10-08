@@ -142,7 +142,7 @@ private:
     std::uint32_t next_entity_id_ = 1;
 
     // 이 방/웨이브에 몇 마리를 낼지
-    int monsters_for_wave(int room, int wave) const;
+    int monsters_for_wave(int room, int wave, int players) const;
 
     void spawn_wave();
     void update_phase(float dt);

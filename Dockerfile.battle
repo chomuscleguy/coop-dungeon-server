@@ -24,6 +24,7 @@ USER battle
 
 WORKDIR /app
 COPY --from=build /src/build/battle_server ./battle_server
+COPY --from=build /src/build/battle_bot ./battle_bot
 
 ENV BATTLE_SERVER_PORT=7778
 EXPOSE 7778/udp

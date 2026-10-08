@@ -93,7 +93,10 @@ struct Connection {
 	std::uint32_t total_acked = 0;
 	std::uint32_t total_lost = 0;
 
-	// 평활화된 왕복 시간. 표본 하나가 튀어도 흔들리지 않게 조금씩만 반영한다.
+	// ack 가 돌아오기까지의 시간. **네트워크 왕복 시간이 아니다** —
+	// 상대가 "다음에 보낼 때" ack 를 실으므로 상대의 전송 주기가 더해진다.
+	// RTO 용도로는 이게 맞다(ack 는 실제로 그만큼 뒤에 온다). 화면에
+	// "핑"으로 띄우면 안 된다. 진짜 왕복은 클라이언트가 Heartbeat 로 잰다.
 	double rtt_ms = 0.0;
 	bool has_rtt = false;
 
@@ -137,6 +140,10 @@ struct Connection {
 		total_sent++;
 
 		if (sent_packets.size() > 256) {
+			// 상한에 밀려 나가는 기록. 이게 ack 도 유실 판정도 못 받으면
+			// "보냈는데 도착도 유실도 아닌" 패킷이 통계에서 사라진다.
+			const SentPacket& old = sent_packets.front();
+			if (!old.acked) ++total_lost;
 			sent_packets.pop_front();
 		}
 	}
