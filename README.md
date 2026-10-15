@@ -77,7 +77,14 @@ server/                  로비 서버 (TCP)
   CMakeLists.txt         vcpkg(Windows)와 apt(리눅스) 양쪽에서 빌드되게
   CMakePresets.json      vcpkg 툴체인 경로 지정
   vcpkg.json             boost-asio, nlohmann-json
-  src/main.cpp           서버 전체 (Session + Server + PlayerRegistry + main)
+  src/
+    main.cpp             포트 결정, 시그널, io.run()
+    Room.h               Item · Boss · RoomPhase · LootAuction · Room
+    Friendship.h         두 사람 사이의 관계 하나
+    PlayerRegistry.h     계정 · 재화 · 인벤토리 · 친구 관계
+    BattleToken.h        배틀 서버와 공유하는 시크릿 · 주소 · 1회용 토큰
+    Session.h / .cpp     연결 하나. Server 를 쓰는 메서드는 .cpp 에
+    Server.h             레지스트리, 방 관리, 브로드캐스트, 틱
 
 battle_server/           배틀 서버 (UDP) — 별도 CMake 프로젝트, 별도 실행 파일
   CMakeLists.txt
@@ -101,20 +108,25 @@ docker-compose.yml       두 서버를 같이 띄운다. 서비스 이름이 곧
 .dockerignore            build/ 를 빌드 컨텍스트에서 제외 (없으면 수 GB를 보낸다)
 ```
 
-**로비는 한 파일, 배틀은 처음부터 나눴다.** 로비는 "한 파일로 버티다 한계를 겪는" 과정 자체가
-기록이라 그대로 뒀다(Step 6 데브로그 참고). 1,475줄이 됐고, 나눌 경계는 이미 코드에 드러나 있다 —
-`Session` / `Server` / `PlayerRegistry` / `Room`·`Boss`·`LootAuction` / `Friendship`.
+**로비는 한 파일로 버티다 Step 21 뒤에 나눴다.** 배틀 서버는 처음부터 나눴고, 그 차이가
+기록으로 남았다.
 
-배틀 서버는 그 교훈을 적용해 처음부터 나눴다. 그리고 **나눴기 때문에 생긴 차이**를 바로 만났다 —
-Boost 1.74 우회(`<utility>`)를 `main.cpp`가 아니라 **`BattleServer.h`에** 넣어야 했다.
-각 `.cpp`는 독립적으로 컴파일되므로, 헤더가 `<boost/asio.hpp>`를 끌어오면 우회도 헤더에 있어야 한다.
+로비는 "한 파일로 버티다 한계를 겪는" 과정 자체가 목적이었다. Step 6 데브로그에 *"헤더/소스
+분리가 필요해지는 이유를 한 파일 안에서 미리 겪은 셈"*이라고 적어뒀는데, 1,640줄까지 가서
+실제로 겪었다 — `Session` 이 `Server` 보다 먼저 정의돼 있어 `server_.xxx()` 를 쓰는 메서드를
+클래스 안에 둘 수 없었고, 그걸 잊어서 두 번 되돌렸다. "어느 클래스 안"을 줄 번호 없이 말할
+수 없다는 것도 마찰이었다.
 
-서버 전체가 `main.cpp` 한 파일이다. Step 6 데브로그에 *"헤더/소스 분리가 필요해지는 이유를
-한 파일 안에서 미리 겪은 셈"*이라고 적어뒀는데, 12스텝을 지나며 1,400줄이 넘었다.
-지금 나누면 좋을 경계는 이미 코드에 드러나 있다 — `Session` / `Server` / `PlayerRegistry` /
-`Room`·`Boss`·`LootAuction` / `Friendship`.
+나누고 나니 제약이 구조로 풀렸다. `Session.h` 는 `class Server;` 전방 선언만 갖고,
+`Server.h` 가 `Session.h` 를 포함하고, `Session.cpp` 가 둘 다 포함해 정의를 쓴다.
+**나눌 경계는 이미 코드에 드러나 있었다** — 그대로 파일이 됐다.
 
-클라이언트(Unity)는 아직 없음. 서버가 어느 정도 완성된 뒤 붙일 예정.
+배틀 서버는 그 교훈을 적용해 처음부터 나눴고, **나눴기 때문에 생긴 차이**를 바로 만났다 —
+Boost 1.74 우회(`<utility>`)를 `main.cpp` 가 아니라 **`BattleServer.h` 에** 넣어야 했다.
+각 `.cpp` 는 독립적으로 컴파일되므로, 헤더가 `<boost/asio.hpp>` 를 끌어오면 우회도 헤더에
+있어야 한다.
+
+클라이언트(Unity)는 아직 없음. 프로토콜이 정해졌으니 붙일 수 있다.
 
 ## 문서
 
