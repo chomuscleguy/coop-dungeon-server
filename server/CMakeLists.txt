@@ -27,7 +27,12 @@ else()
     endif()
 endif()
 
-add_executable(game_server src/main.cpp)
+add_executable(game_server
+    src/main.cpp
+    src/Session.cpp
+)
+
+target_include_directories(game_server PRIVATE src)
 
 target_link_libraries(game_server PRIVATE
     ${BOOST_ASIO_TARGET}
