@@ -130,6 +130,10 @@ namespace protocol {
 	// 하트비트 간격의 몇 배로 잡아야 한두 개 유실돼도 안 끊긴다.
 	inline constexpr int kTimeoutSeconds = 5;
 
+	// 아무도 없는 던전을 이만큼 두고 치운다.
+	// 연결 타임아웃(5초)의 3배 — 마지막 한 명이 끊기고도 잠시 기다린다.
+	inline constexpr int kBattleIdleSeconds = 15;
+
 	// 게임 루프 주기. 30Hz 는 격투/슈팅 장르의 사실상 표준이다.
 	// 60Hz 는 대역폭이 두 배인데, 몬스터 수십 마리의 위치를 보내는 쪽이
 	// 프레임 수보다 중요하다. 클라이언트는 그 사이를 보간해서 그린다.

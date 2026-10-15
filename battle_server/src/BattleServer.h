@@ -47,6 +47,25 @@ struct PendingPlayer {
 	std::uint32_t battle_id = 0;
 };
 
+// 던전 한 판. 로비가 발급한 battle_id 로 구분된다.
+//
+// 지금까지 BattleServer 에 흩어져 있던 멤버들인데, 전부 "던전마다 하나씩"
+// 있어야 하는 것들이었다. 전역으로 둔 게 "던전이 하나"라는 가정이었다.
+struct Battle {
+	std::uint32_t id = 0;
+	World world;
+	std::vector<std::string> roster;
+
+	protocol::RoomPhase last_phase = protocol::RoomPhase::Fighting;
+	protocol::RoomStatePayload last_room_state{};
+
+	// 언제부터 비어 있었나. 기본값(epoch)은 "비어 있지 않음"을 뜻한다.
+	std::chrono::steady_clock::time_point empty_since{};
+
+	// 결과를 이미 보냈나. 두 번 보내면 안 된다.
+	bool reported = false;
+};
+
 class BattleServer {
 public:
 	BattleServer(boost::asio::io_context& io, unsigned short port,
@@ -92,7 +111,13 @@ private:
 
 	std::array<std::uint8_t, 1400> send_buffer_;
 	ConnectionMap connections_;
-	World world_;
+
+	// battle_id -> 던전. 한 서버가 여러 판을 동시에 돌린다.
+	std::unordered_map<std::uint32_t, Battle> battles_;
+
+	// 없으면 만들어서 돌려준다.
+	Battle& battle_for(std::uint32_t id);
+
 	std::uint32_t next_connection_id_ = 1;
 
 	// on_ack_received 가 채우는 임시 버퍼. 매번 벡터를 새로 만들지 않으려고
@@ -103,11 +128,6 @@ private:
 	std::vector<protocol::EntityState> snapshot_buffer_;
 	std::vector<protocol::EventPayload> event_buffer_;
 
-	// 이 던전의 식별자와 참가자. 중간에 끊긴 사람도 명단에는 남는다 —
-	// 결과는 "지금 접속해 있는 사람"이 아니라 "이 판을 돈 사람"이다.
-	std::uint32_t battle_id_ = 0;
-	std::vector<std::string> roster_;
-
 	// 다음 틱의 목표 시각. "지금부터 33ms"가 아니라 "이 시각에"로 걸어야
 	// 처리 시간이 누적되지 않는다.
 	std::chrono::steady_clock::time_point next_tick_;
@@ -115,20 +135,14 @@ private:
 
 	std::uint64_t tick_count_ = 0;
 
-	// 직전에 보낸 방 상태. 바뀌었을 때만 즉시 보내기 위한 비교용.
-	protocol::RoomStatePayload last_room_state_{};
-
 	// 틱 간격이 목표에서 얼마나 벗어났는지 (1초마다 리셋)
 	double worst_jitter_ms_ = 0.0;
 	int ticks_this_second_ = 0;
 
-	void report_result(const char* result);
+	void report_result(Battle& b, const char* result);
 
 	LobbyLink lobby_;
 	std::string secret_;
-
-	// 이번 틱에 Failed 로 **바뀌었는지** 보려면 직전 값이 필요하다.
-	protocol::RoomPhase last_phase_ = protocol::RoomPhase::Fighting;
 
 	TrafficStats stats_;
 	std::size_t peak_snapshot_ever_ = 0;

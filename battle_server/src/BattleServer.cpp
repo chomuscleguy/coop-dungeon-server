@@ -152,7 +152,8 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 		protocol::InputPayload in;
 		if (protocol::read_input(data + protocol::kHeaderSize,
 			size - protocol::kHeaderSize, in)) {
-			Player* p = world_.find_player(c->entity_id);
+			Battle& b = battle_for(c->battle_id); 
+			Player* p = b.world.find_player(c->entity_id);
 			if (p) p->set_input(in.move_x, in.move_y);
 		}
 		return;      // 초당 30번 오므로 로그를 남기지 않는다
@@ -168,6 +169,16 @@ void BattleServer::handle_packet(const udp::endpoint& from,
 Connection* BattleServer::find_connection(const udp::endpoint& from) {
 	auto it = connections_.find(from);
 	return (it == connections_.end()) ? nullptr : &it->second;
+}
+
+Battle& BattleServer::battle_for(std::uint32_t id) {
+	auto it = battles_.find(id);
+	if (it != battles_.end()) return it->second;
+
+	Battle& b = battles_[id];
+	b.id = id;
+	std::cout << "[battle " << id << "] created\n";
+	return b;
 }
 
 void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq,
@@ -211,12 +222,15 @@ void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq
 		return;
 	}
 
+	Battle& b = battle_for(grant_battle);
+
 	Connection c;
 	c.id = next_connection_id_++;
 	c.endpoint = from;
 	c.last_seen = std::chrono::steady_clock::now();
 	c.on_packet_received(seq);
-	c.entity_id = world_.add_player();
+	c.battle_id = b.id;
+	c.entity_id = b.world.add_player();
 	c.username = username;
 	c.lobby_player_id = lobby_id;
 
@@ -225,15 +239,15 @@ void BattleServer::handle_handshake(const udp::endpoint& from, std::uint16_t seq
 	// 명단에 올린다. 중간에 끊겨도 여기서는 안 지운다 —
 	// 결과는 "지금 접속해 있는 사람"이 아니라 "이 판을 돈 사람"이다.
 	if (!username.empty()) {
-		battle_id_ = grant_battle;
 		bool known = false;
-		for (const auto& u : roster_) { if (u == username) { known = true; break; } }
-		if (!known) roster_.push_back(username);
+		for (const auto& u : b.roster) { if (u == username) { known = true; break; } }
+		if (!known) b.roster.push_back(username);
 	}
 
 	std::cout << "Handshake from " << from
 		<< " -> conn " << c.id
-		<< " (entity " << c.entity_id
+		<< " (battle " << b.id
+		<< ", entity " << c.entity_id
 		<< ", user " << (username.empty() ? "<anon>" : username) << ")" << '\n';
 
 	send_to(connections_[from], protocol::PacketType::HandshakeAck, true);
@@ -315,8 +329,10 @@ void BattleServer::on_tick() {
 	tick_count_++;
 	ticks_this_second_++;
 
-	// 게임을 한 틱 진행한다. 네트워크와 분리된 부분.
-	world_.update(protocol::kTickSeconds);
+	// 각 던전을 한 틱씩 진행한다. 서로 독립이라 순서는 상관없다.
+	for (auto& entry : battles_) {
+		entry.second.world.update(protocol::kTickSeconds);
+	}
 
 	// 매 틱: 재전송 검사. RTO 해상도가 1초에서 33ms 로 내려왔다.
 	for (auto& entry : connections_) {
@@ -342,12 +358,15 @@ void BattleServer::on_tick() {
 	broadcast_room_state();
 	broadcast_snapshot();
 
-	// 상태가 "바뀐" 순간에만 한 번 보낸다. 매 틱 보내면 로비가 터진다.
-	if (world_.phase != last_phase_) {
-		if (world_.phase == protocol::RoomPhase::Failed) {
-			report_result("wipe");
+	// 상태가 "바뀐" 순간에만 한 번 보낸다. 던전마다 따로 본다.
+	for (auto& entry : battles_) {
+		Battle& b = entry.second;
+		if (b.world.phase == b.last_phase) continue;
+
+		if (b.world.phase == protocol::RoomPhase::Failed) {
+			report_result(b, "wipe");
 		}
-		last_phase_ = world_.phase;
+		b.last_phase = b.world.phase;
 	}
 
 	if (tick_count_ % protocol::kTickHz == 0) {
@@ -357,18 +376,24 @@ void BattleServer::on_tick() {
 
 void BattleServer::broadcast_events() {
 	if (connections_.empty()) return;
-	if (world_.died_this_tick.empty()) return;
 
-	for (std::uint32_t id : world_.died_this_tick) {
-		protocol::EventPayload e;
-		e.kind = protocol::EventKind::MonsterDied;
-		e.entity_id = id;
+	for (auto& entry : battles_) {
+		Battle& b = entry.second;
+		if (b.world.died_this_tick.empty()) continue;
 
-		protocol::write_event(send_buffer_.data() + protocol::kHeaderSize, e);
+		for (std::uint32_t id : b.world.died_this_tick) {
+			protocol::EventPayload e;
+			e.kind = protocol::EventKind::MonsterDied;
+			e.entity_id = id;
 
-		for (auto& entry : connections_) {
-			send_to(entry.second, protocol::PacketType::Event,
-				true, 1, protocol::kEventPayloadSize);
+			protocol::write_event(send_buffer_.data() + protocol::kHeaderSize, e);
+
+			// 같은 던전에 있는 사람에게만. 남의 던전 소식은 보낼 이유가 없다.
+			for (auto& ce : connections_) {
+				if (ce.second.battle_id != b.id) continue;
+				send_to(ce.second, protocol::PacketType::Event,
+					true, 1, protocol::kEventPayloadSize);
+			}
 		}
 	}
 }
@@ -376,52 +401,55 @@ void BattleServer::broadcast_events() {
 void BattleServer::broadcast_room_state() {
 	if (connections_.empty()) return;
 
-	protocol::RoomStatePayload s;
-	s.room = static_cast<std::uint8_t>(world_.room_index);
-	s.wave = static_cast<std::int8_t>(world_.wave_index);
-	s.phase = world_.phase;
-	s.monsters = static_cast<std::uint8_t>(
-		world_.monster_count() > 255 ? 255 : world_.monster_count());
-	s.at_door = static_cast<std::uint8_t>(world_.at_door);
-	s.players = static_cast<std::uint8_t>(world_.player_count());
-	s.countdown_ms = static_cast<std::uint16_t>(
-		world_.transition_timer > 0.0f ? world_.transition_timer * 1000.0f : 0);
-
-	// 카운트다운은 매 틱 바뀌므로 비교에서 뺀다. 그것만 바뀌었으면
-	// 1초에 한 번만 보내면 된다 — 클라가 자기 시계로 세면 되니까.
-	bool changed =
-		s.room != last_room_state_.room ||
-		s.wave != last_room_state_.wave ||
-		s.phase != last_room_state_.phase ||
-		s.at_door != last_room_state_.at_door ||
-		s.players != last_room_state_.players;
-
 	bool periodic = (tick_count_ % protocol::kTickHz == 0);
-	if (!changed && !periodic) return;
 
-	last_room_state_ = s;
+	for (auto& entry : battles_) {
+		Battle& b = entry.second;
 
-	protocol::write_room_state(send_buffer_.data() + protocol::kHeaderSize, s);
-	for (auto& entry : connections_) {
-		send_to(entry.second, protocol::PacketType::RoomState,
-			false, 1, protocol::kRoomStateSize);
+		protocol::RoomStatePayload s;
+		s.room = static_cast<std::uint8_t>(b.world.room_index);
+		s.wave = static_cast<std::int8_t>(b.world.wave_index);
+		s.phase = b.world.phase;
+		s.monsters = static_cast<std::uint8_t>(
+			b.world.monster_count() > 255 ? 255 : b.world.monster_count());
+		s.at_door = static_cast<std::uint8_t>(b.world.at_door);
+		s.players = static_cast<std::uint8_t>(b.world.player_count());
+		s.countdown_ms = static_cast<std::uint16_t>(
+			b.world.transition_timer > 0.0f ? b.world.transition_timer * 1000.0f : 0);
+
+		// 카운트다운은 매 틱 바뀌므로 비교에서 뺀다.
+		bool changed =
+			s.room != b.last_room_state.room ||
+			s.wave != b.last_room_state.wave ||
+			s.phase != b.last_room_state.phase ||
+			s.at_door != b.last_room_state.at_door ||
+			s.players != b.last_room_state.players;
+
+		if (!changed && !periodic) continue;
+
+		b.last_room_state = s;
+
+		protocol::write_room_state(send_buffer_.data() + protocol::kHeaderSize, s);
+		for (auto& ce : connections_) {
+			if (ce.second.battle_id != b.id) continue;
+			send_to(ce.second, protocol::PacketType::RoomState,
+				false, 1, protocol::kRoomStateSize);
+		}
 	}
 }
 
-void BattleServer::report_result(const char* result) {
-	// 18d 에서는 손으로 만들었다. 전부 정수와 고정 문자열이었으니까.
-	// 이제 사용자 이름이 들어온다 — 따옴표나 역슬래시가 섞이면 손으로 만든
-	// JSON 은 깨진다. 조건이 바뀌었으니 방식도 바꾼다.
+void BattleServer::report_result(Battle& b, const char* result) {
+	b.reported = true;
 	nlohmann::json msg;
 	msg["type"] = "DungeonResult";
 	msg["data"] = {
 		{"secret", secret_},
-		{"battleId", battle_id_},
+		{"battleId", b.id},
 		{"result", result},
-		{"room", world_.final_room},
-		{"wave", world_.final_wave},
-		{"kills", world_.total_kills},
-		{"players", roster_}
+		{"room", b.world.final_room},
+		{"wave", b.world.final_wave},
+		{"kills", b.world.total_kills},
+		{"players", b.roster}
 	};
 
 	std::string body = msg.dump();
@@ -472,20 +500,26 @@ void BattleServer::handle_lobby_message(const std::string& json) {
 void BattleServer::broadcast_snapshot() {
 	if (connections_.empty()) return;
 
-	world_.collect_states(snapshot_buffer_);
-	if (snapshot_buffer_.empty()) return;
+	for (auto& entry : battles_) {
+		Battle& b = entry.second;
 
-	std::size_t payload_size = protocol::write_snapshot(
-		send_buffer_.data() + protocol::kHeaderSize,
-		send_buffer_.size() - protocol::kHeaderSize,
-		snapshot_buffer_.data(), snapshot_buffer_.size());
+		b.world.collect_states(snapshot_buffer_);
+		if (snapshot_buffer_.empty()) continue;
 
-	if (payload_size > stats_.peak_snapshot) stats_.peak_snapshot = payload_size;
-	if (payload_size > peak_snapshot_ever_) peak_snapshot_ever_ = payload_size;
+		// 본문은 던전마다 한 번만 쓴다.
+		std::size_t payload_size = protocol::write_snapshot(
+			send_buffer_.data() + protocol::kHeaderSize,
+			send_buffer_.size() - protocol::kHeaderSize,
+			snapshot_buffer_.data(), snapshot_buffer_.size());
 
-	for (auto& entry : connections_) {
-		send_to(entry.second, protocol::PacketType::Snapshot,
-			false, 1, payload_size);
+		if (payload_size > stats_.peak_snapshot) stats_.peak_snapshot = payload_size;
+		if (payload_size > peak_snapshot_ever_) peak_snapshot_ever_ = payload_size;
+
+		for (auto& ce : connections_) {
+			if (ce.second.battle_id != b.id) continue;
+			send_to(ce.second, protocol::PacketType::Snapshot,
+				false, 1, payload_size);
+		}
 	}
 }
 
@@ -526,20 +560,48 @@ void BattleServer::on_second() {
 		stats_.reset();
 	}
 
-	const char* phase_name = "?";
-	switch (world_.phase) {
-	case protocol::RoomPhase::Fighting:      phase_name = "Fighting"; break;
-	case protocol::RoomPhase::Cleared:       phase_name = "Cleared"; break;
-	case protocol::RoomPhase::Transitioning: phase_name = "Transitioning"; break;
-	case protocol::RoomPhase::Failed:        phase_name = "FAILED"; break;
+	// ---- 빈 던전 정리 ----
+	std::vector<std::uint32_t> gone;
+
+	for (auto& entry : battles_) {
+		Battle& b = entry.second;
+
+		int alive = 0;
+		for (const auto& ce : connections_) {
+			if (ce.second.battle_id == b.id) ++alive;
+		}
+
+		if (alive > 0) {
+			b.empty_since = {};          // 비어 있지 않다. 시계를 끈다
+			continue;
+		}
+
+		if (b.empty_since.time_since_epoch().count() == 0) {
+			b.empty_since = now;         // 방금 비었다. 시계를 켠다
+			continue;
+		}
+
+		if (now - b.empty_since < std::chrono::seconds(protocol::kBattleIdleSeconds)) {
+			continue;
+		}
+		gone.push_back(b.id);
 	}
 
-	std::cout << "[world] room=" << world_.room_index
-		<< " wave=" << world_.wave_index
-		<< " phase=" << phase_name
-		<< " monsters=" << world_.monster_count()
-		<< " atdoor=" << world_.at_door
-		<< " kills=" << world_.total_kills << '\n';
+	// 순회 중에 지울 수 없으니 모아뒀다가 처리한다. (Step 10 과 같은 패턴)
+	for (std::uint32_t id : gone) {
+		Battle& b = battles_[id];
+
+		if (!b.reported) {
+			// 전멸도 클리어도 아니다. 다들 그냥 나갔다.
+			b.world.final_room = static_cast<std::uint32_t>(b.world.room_index);
+			b.world.final_wave = static_cast<std::uint32_t>(
+				b.world.wave_index < 0 ? 0 : b.world.wave_index);
+			report_result(b, "abandoned");
+		}
+
+		std::cout << "[battle " << id << "] closed\n";
+		battles_.erase(id);
+	}
 
 	worst_jitter_ms_ = 0.0;
 	ticks_this_second_ = 0;
@@ -556,14 +618,6 @@ void BattleServer::on_second() {
 			<< " rto=" << c.rto_ms() << "ms"
 			<< " gaveup=" << c.total_given_up << '\n';
 
-		const Player* p = world_.find_player(c.entity_id);
-		if (p) {
-			std::cout << "[conn " << c.id << "] entity=" << p->id
-				<< " input=(" << static_cast<int>(p->input_x) << ","
-				<< static_cast<int>(p->input_y) << ")"
-				<< " pos=(" << p->x << "," << p->y << ")" << '\n';
-		}
-
 		if (now - c.last_seen > limit) {
 			dead.push_back(entry.first);
 		}
@@ -572,8 +626,12 @@ void BattleServer::on_second() {
 	for (const udp::endpoint& ep : dead) {
 		Connection& c = connections_[ep];
 		std::cout << "Timeout: conn " << c.id
-			<< " (entity " << c.entity_id << ", " << ep << ")" << '\n';
-		world_.remove_player(c.entity_id);
+			<< " (battle " << c.battle_id
+			<< ", entity " << c.entity_id << ", " << ep << ")" << '\n';
+
+		auto it = battles_.find(c.battle_id);
+		if (it != battles_.end()) it->second.world.remove_player(c.entity_id);
+
 		connections_.erase(ep);
 	}
 }
