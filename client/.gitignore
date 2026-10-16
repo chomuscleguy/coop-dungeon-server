@@ -1,0 +1,44 @@
+# Unity 가 만드는 것들. 전부 재생성되므로 커밋하지 않는다.
+# Library/ 는 수 GB까지 커진다.
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+
+# Visual Studio / Rider 가 만드는 것
+.vs/
+.idea/
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 크래시 리포트
+sysinfo.txt
+*.stackdump
+crashlytics-build.properties
+
+# 빌드 산출물
+*.apk
+*.aab
+*.unitypackage
+*.app
