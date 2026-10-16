@@ -64,6 +64,7 @@ namespace protocol {
 		Player = 0,
 		Monster = 1,
 		Door = 2,
+		Boss = 3,           // 마지막 방의 한 마리. 클라가 다르게 그린다
 	};
 
 	// 플레이어의 생존 상태. 몬스터는 항상 Alive 로 보낸다.
@@ -103,6 +104,7 @@ namespace protocol {
 		Cleared = 1,        // 전부 격파. 문이 열렸다
 		Transitioning = 2,  // 과반수 도달. 카운트다운 중
 		Failed = 3,         // 전멸. 던전 실패
+		Completed = 4,      // 보스를 잡았다. 던전 성공
 	};
 
 	// 방 진행 상황. 스냅샷처럼 계속 보내므로 재전송하지 않는다.
@@ -162,6 +164,17 @@ namespace protocol {
 	inline constexpr float kAttackInterval = 0.5f;   // 초. 몬스터(30hp)는 3발.
 
 	inline constexpr int kWavesPerRoom = 3;
+
+	// 던전 길이. 마지막 방(index = kRoomsPerDungeon - 1)은 보스방이다.
+	// 플레이 시간을 보고 정할 값이라 지금은 잠정치다.
+	inline constexpr int kRoomsPerDungeon = 5;
+
+	// 보스는 웨이브를 대신한다. 한 마리뿐이라 체력이 많고,
+	// 느리지만 한 대가 아프다.
+	inline constexpr int   kBossHp = 400;
+	inline constexpr float kBossSpeed = 1.5f;
+	inline constexpr int   kBossDamage = 12;
+	inline constexpr float kBossAttackInterval = 1.5f;
 
 	// 웨이브 사이 숨 돌릴 틈. 끝나자마자 다음이 나오면 정신없다.
 	inline constexpr float kWaveBreakSeconds = 2.0f;

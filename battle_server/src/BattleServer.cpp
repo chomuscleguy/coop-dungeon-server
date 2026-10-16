@@ -366,6 +366,9 @@ void BattleServer::on_tick() {
 		if (b.world.phase == protocol::RoomPhase::Failed) {
 			report_result(b, "wipe");
 		}
+		else if (b.world.phase == protocol::RoomPhase::Completed) {
+			report_result(b, "clear");
+		}
 		b.last_phase = b.world.phase;
 	}
 
@@ -558,6 +561,27 @@ void BattleServer::on_second() {
 		std::cout << '\n';
 
 		stats_.reset();
+	}
+
+	for (auto& entry : battles_) {
+		Battle& b = entry.second;
+		const char* phase_name = "?";
+		switch (b.world.phase) {
+		case protocol::RoomPhase::Fighting:      phase_name = "Fighting"; break;
+		case protocol::RoomPhase::Cleared:       phase_name = "Cleared"; break;
+		case protocol::RoomPhase::Transitioning: phase_name = "Transitioning"; break;
+		case protocol::RoomPhase::Failed:        phase_name = "FAILED"; break;
+		case protocol::RoomPhase::Completed:     phase_name = "COMPLETED"; break;
+		}
+
+		std::cout << "[battle " << b.id << "]"
+			<< " room=" << b.world.room_index
+			<< (b.world.is_boss_room() ? "(boss)" : "")
+			<< " wave=" << b.world.wave_index
+			<< " phase=" << phase_name
+			<< " monsters=" << b.world.monster_count()
+			<< " players=" << b.world.player_count()
+			<< " kills=" << b.world.total_kills << '\n';
 	}
 
 	// ---- 빈 던전 정리 ----

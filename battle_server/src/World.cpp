@@ -84,6 +84,29 @@ void World::spawn_wave() {
     }
 }
 
+void World::spawn_boss() {
+    // 파티 한가운데에서 조금 떨어진 곳에 하나.
+    float cx = 0.0f;
+    float cy = 0.0f;
+    if (!players_.empty()) {
+        for (const Player& p : players_) { cx += p.x; cy += p.y; }
+        cx /= players_.size();
+        cy /= players_.size();
+    }
+
+    std::uint32_t id = spawn_monster(cx + protocol::kSpawnRadius, cy);
+
+    for (Monster& m : monsters_) {
+        if (m.id != id) continue;
+        m.is_boss = true;
+        m.hp = protocol::kBossHp;
+        m.max_hp = m.hp;
+        break;
+    }
+
+    std::cout << "[world] BOSS spawned (hp " << protocol::kBossHp << ")\n";
+}
+
 void World::reset_player_positions() {
     int n = static_cast<int>(players_.size());
     if (n == 0) return;
@@ -152,6 +175,7 @@ void World::update_door(float dt) {
 
 void World::update_phase(float dt) {
     if (phase == protocol::RoomPhase::Failed) return;
+    if (phase == protocol::RoomPhase::Completed) return;
     // 아무도 없으면 던전이 흐르지 않는다. 첫 플레이어가 들어오면
     // 다음 틱에 wave_index 가 -1 에서 0 이 되면서 시작된다.
     if (players_.empty()) return;
@@ -174,6 +198,16 @@ void World::update_phase(float dt) {
 
     wave_index++;
 
+    // 보스방은 웨이브가 없다. 첫 진입에 보스 하나를 내고 끝이다.
+    // 보스를 잡으면 resolve_attacks 가 Completed 로 바꾼다.
+    if (is_boss_room()) {
+        if (wave_index == 0) {
+            std::cout << "[world] room " << room_index << " BOSS ROOM\n";
+            spawn_boss();
+        }
+        return;
+    }
+
     if (wave_index >= protocol::kWavesPerRoom) {
         phase = protocol::RoomPhase::Cleared;
         std::cout << "[world] room " << room_index << " cleared\n";
@@ -190,9 +224,11 @@ void World::update_phase(float dt) {
 void World::update(float dt) {
     died_this_tick.clear();
 
-    // 실패한 던전은 흐르지 않는다. 몬스터도 멈추고 타이머도 안 간다.
+    // 끝난 던전은 흐르지 않는다. 몬스터도 멈추고 타이머도 안 간다.
     // 클라이언트가 결과 화면을 띄우는 동안 상태가 바뀌면 안 된다.
+    // 실패든 성공이든 "끝났다"는 점은 같다.
     if (phase == protocol::RoomPhase::Failed) return;
+    if (phase == protocol::RoomPhase::Completed) return;
 
     for (Player& p : players_) {
         p.apply_input(dt);
@@ -210,7 +246,7 @@ void World::update(float dt) {
         if (d2 < 0.0001f) continue;
 
         float d = std::sqrt(d2);
-        float step = protocol::kMonsterSpeed * dt;
+        float step = m.speed() * dt;
 
         // 이번 틱에 목표를 지나칠 만큼 가까우면 딱 붙인다.
         // 안 그러면 목표를 중심으로 진동한다.
@@ -302,10 +338,21 @@ void World::resolve_attacks(float dt) {
             continue;
         }
         std::uint32_t dead_id = monsters_[i].id;
+        bool was_boss = monsters_[i].is_boss;
+
         monsters_[i] = monsters_.back();
         monsters_.pop_back();
         total_kills++;
         died_this_tick.push_back(dead_id);
+
+        // 보스가 죽으면 던전이 끝난다. 다음 방도 문도 없다.
+        if (was_boss) {
+            phase = protocol::RoomPhase::Completed;
+            final_room = static_cast<std::uint32_t>(room_index);
+            final_wave = static_cast<std::uint32_t>(wave_index < 0 ? 0 : wave_index);
+            std::cout << "[world] BOSS DOWN - dungeon COMPLETED"
+                << " (kills " << total_kills << ")\n";
+        }
         // i 를 올리지 않는다. 방금 당겨온 것을 아직 안 봤다.
     }
 }
@@ -327,8 +374,8 @@ void World::resolve_monster_attacks(float dt) {
         }
         if (!victim) continue;
 
-        victim->hp -= protocol::kMonsterDamage;
-        m.attack_timer += protocol::kMonsterAttackInterval;
+        victim->hp -= m.damage();
+        m.attack_timer += m.attack_interval();
 
         if (victim->hp <= 0) {
             victim->hp = 0;
@@ -413,7 +460,8 @@ void World::collect_states(std::vector<protocol::EntityState>& out) const {
     for (const Monster& m : monsters_) {
         protocol::EntityState s;
         s.id = m.id;
-        s.type = protocol::EntityType::Monster;
+        s.type = m.is_boss ? protocol::EntityType::Boss
+                           : protocol::EntityType::Monster;
         s.x = m.x;
         s.y = m.y;
         s.hp_pct = static_cast<std::uint8_t>(

@@ -82,8 +82,23 @@ struct Monster {
     float x = 0.0f;
     float y = 0.0f;
     int hp = protocol::kMonsterHp;
-    int max_hp = protocol::kMonsterHp;  
-    float attack_timer = 0.0f;    
+    int max_hp = protocol::kMonsterHp;
+    float attack_timer = 0.0f;
+
+    // 보스도 같은 Monster 로 다룬다. 다른 건 수치와 그림뿐이라,
+    // 타입을 나누면 추적·공격·사망 코드가 전부 둘로 늘어난다.
+    bool is_boss = false;
+
+    float speed() const {
+        return is_boss ? protocol::kBossSpeed : protocol::kMonsterSpeed;
+    }
+    int damage() const {
+        return is_boss ? protocol::kBossDamage : protocol::kMonsterDamage;
+    }
+    float attack_interval() const {
+        return is_boss ? protocol::kBossAttackInterval
+                       : protocol::kMonsterAttackInterval;
+    }
 };
 
 // 전투 공간. 플레이어와 (곧) 몬스터가 여기 산다.
@@ -118,6 +133,11 @@ public:
     std::size_t monster_count() const { return monsters_.size(); }
     std::size_t player_count() const { return players_.size(); }
 
+    // 마지막 방인가. 보스방이면 웨이브 대신 보스 하나가 나온다.
+    bool is_boss_room() const {
+        return room_index >= protocol::kRoomsPerDungeon - 1;
+    }
+
     // 전멸 시각. 로비에 결과를 보낼 때 쓴다 (18d).
     std::uint32_t final_room = 0;
     std::uint32_t final_wave = 0;
@@ -145,6 +165,7 @@ private:
     int monsters_for_wave(int room, int wave, int players) const;
 
     void spawn_wave();
+    void spawn_boss();
     void update_phase(float dt);
 
     // 문 앞에 서 있는 플레이어 수를 센다.
