@@ -29,6 +29,7 @@ services:
       - LOBBY_HOST=game-server
       - LOBBY_PORT=7777
       - BATTLE_SECRET=${BATTLE_SECRET:-dev-secret}
+      - BATTLE_ALLOW_ANONYMOUS=${BATTLE_ALLOW_ANONYMOUS:-0}
     depends_on:
       - game-server
     stop_grace_period: 30s

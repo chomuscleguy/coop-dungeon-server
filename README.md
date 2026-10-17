@@ -71,6 +71,10 @@ TCP는 "모든 바이트가 중요하다"를 전제하는데, 실시간 게임�
 - [x] Step 21: 던전 하나당 World 하나 (한 서버가 여러 판 동시 진행)
 - [x] Step 22: 끝이 있는 던전 (보스방, clear 결과)
 
+**클라이언트 (Unity)** — `client/`
+
+- [x] Step 23: 보는 클라이언트 (UDP 소켓, ack, 스냅샷 그리기, 입력 30Hz)
+
 ## 프로젝트 구조
 
 ```
@@ -101,6 +105,13 @@ battle_server/           배틀 서버 (UDP) — 별도 CMake 프로젝트, 별�
     LobbyLink.h/.cpp     로비(TCP)와의 지속 연결. 끊기면 다시 붙는다
     bot.h / bot_main.cpp 부하 테스트용 봇 (battle_bot 실행 파일, Protocol.cpp 공유)
 
+client/                  유니티 클라이언트 (Unity 6, URP 2D)
+  Assets/Scripts/
+    BattleClient.cs      UDP 소켓, 핸드셰이크, ack 생성, 하트비트, 입력 30Hz
+    Net/
+      Protocol.cs        Protocol.h 를 C# 으로 옮긴 것. 순수 바이트 변환
+      WorldView.cs       스냅샷을 네모로 그린다. ID 로 짝지어 추적
+
 tools/
   test-client.ps1        PowerShell 임시 테스트 클라이언트 (로비용)
 Dockerfile               로비 서버용. 멀티 스테이지 (빌드 단계 / 실행 단계)
@@ -127,7 +138,11 @@ Boost 1.74 우회(`<utility>`)를 `main.cpp` 가 아니라 **`BattleServer.h` �
 각 `.cpp` 는 독립적으로 컴파일되므로, 헤더가 `<boost/asio.hpp>` 를 끌어오면 우회도 헤더에
 있어야 한다.
 
-클라이언트(Unity)는 아직 없음. 프로토콜이 정해졌으니 붙일 수 있다.
+**클라이언트는 Step 23 에서 붙였다.** 프로토콜을 C# 으로 옮긴 `Protocol.cs` 는
+`UnityEngine` 을 전혀 쓰지 않는다 — 순수 바이트 변환이라 서버 쪽 `Protocol.cpp` 와
+나란히 놓고 비교할 수 있다. 다만 **거울이 둘이 되면 언젠가 어긋난다.** 지금 규칙은
+"`Protocol.h` 를 고치면 `Protocol.cs` 도 같이 고친다"이고, 이게 비용으로 느껴지면
+그때 생성기를 만든다.
 
 ## 문서
 

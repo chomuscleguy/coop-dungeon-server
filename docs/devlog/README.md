@@ -25,3 +25,4 @@
 - [Step 20 — 두 서버가 한 바퀴를 돈다](step-20.md)
 - [Step 21 — 던전 하나당 World 하나](step-21.md)
 - [Step 22 — 끝이 있는 던전](step-22.md)
+- [Step 23 — 보는 클라이언트](step-23.md)
